@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Marine Magnetics Explorer</title>
+  <link rel="stylesheet" href="/static/vendor/css/vuetify.min.css" />
+  <link rel="stylesheet" href="/static/vendor/css/materialdesignicons.min.css" />
+  <link rel="stylesheet" href="/static/vendor/css/roboto.css" />
+  <style>
+    html, body { margin: 0; height: 100%; background: #ffffff; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 13px; }
+    .sentence-scroll { max-height: 220px; overflow-y: auto; border: 1px solid #e6ecf2; border-radius: 4px; padding: 8px; background: #fafbfc; }
+    .sentence-line { padding: 4px 0; border-bottom: 1px solid #eef2f6; word-break: break-all; }
+    .sentence-line:last-child { border-bottom: none; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <v-app>
+      <v-app-bar app flat color="white" class="elevation-1" style="border-bottom: 2px solid #0a2540;">
+        <v-toolbar-title class="primary--text font-weight-bold">Marine Magnetics Explorer</v-toolbar-title>
+        <v-spacer></v-spacer>
+        <v-chip small outlined color="primary" v-if="connected"><v-icon left small>mdi-serial-port</v-icon>Serial</v-chip>
+        <v-chip small outlined :color="gpsOk ? 'success' : 'grey'" class="ml-1">
+          <v-icon left small>mdi-crosshairs-gps</v-icon>GPS {{ gpsLabel }}
+        </v-chip>
+        <v-chip small outlined color="primary" class="ml-1">
+          <v-icon left small>mdi-send</v-icon>MAVLink NVF: {{ nvfPostsOk }}
+        </v-chip>
+      </v-app-bar>
+
+      <v-main style="background: #ffffff;">
+        <v-container fluid class="py-4">
+          <v-tabs v-model="tab" background-color="transparent" color="primary" slider-color="primary">
+            <v-tab>Connection</v-tab>
+            <v-tab @click="loadLogs">Logs</v-tab>
+          </v-tabs>
+          <v-divider class="mb-4"></v-divider>
+
+          <v-tabs-items v-model="tab">
+            <v-tab-item>
+              <v-row dense align="center">
+                <v-col cols="12" md="4">
+                  <v-select
+                    v-model="selectedPort"
+                    :items="portItems"
+                    label="USB / serial port"
+                    outlined dense
+                    hide-details
+                    color="primary"
+                    item-text="label"
+                    item-value="device"
+                    prepend-inner-icon="mdi-usb"
+                    @change="saveSettingsDebounced"
+                  ></v-select>
+                </v-col>
+                <v-col cols="12" md="3">
+                  <v-select
+                    v-model="baudRate"
+                    :items="baudChoices"
+                    label="Baud rate"
+                    outlined dense
+                    hide-details
+                    color="primary"
+                    prepend-inner-icon="mdi-speedometer"
+                    @change="saveSettingsDebounced"
+                  ></v-select>
+                </v-col>
+                <v-col cols="12" md="5" class="d-flex flex-wrap align-center" style="gap: 8px;">
+                  <v-btn color="primary" depressed :loading="busy" :disabled="connected" @click="connect">
+                    <v-icon left>mdi-connection</v-icon>Connect
+                  </v-btn>
+                  <v-btn color="primary" outlined :disabled="!connected" @click="disconnect">
+                    <v-icon left>mdi-stop</v-icon>Disconnect
+                  </v-btn>
+                  <v-btn icon color="primary" @click="fetchPorts" :loading="portsLoading" title="Refresh ports">
+                    <v-icon>mdi-refresh</v-icon>
+                  </v-btn>
+                </v-col>
+              </v-row>
+
+              <v-row dense class="mt-2">
+                <v-col cols="12">
+                  <v-alert v-if="alertMsg" dense outlined type="error" dismissible @input="alertMsg = ''">{{ alertMsg }}</v-alert>
+                  <div class="d-flex flex-wrap" style="gap: 8px;">
+                    <v-chip small :color="connected ? 'success' : 'grey'" text-color="white">
+                      {{ connected ? 'Serial connected' : 'Serial idle' }}
+                    </v-chip>
+                    <v-chip small outlined color="primary">NVF last: {{ nvfLastStatus }}</v-chip>
+                    <v-chip v-if="nvfLastEndpoint" small outlined>{{ nvfLastEndpoint }}</v-chip>
+                    <v-chip v-if="currentLog" small outlined color="primary">Log: {{ currentLog }}</v-chip>
+                  </div>
+                </v-col>
+              </v-row>
+
+              <v-row dense class="mt-4">
+                <v-col cols="12" md="6">
+                  <v-card outlined>
+                    <v-card-title class="py-2 subtitle-1 primary--text">Live sentences (last 10)</v-card-title>
+                    <v-card-text>
+                      <div class="sentence-scroll mono">
+                        <div v-for="(ln, i) in liveLines" :key="i" class="sentence-line">{{ ln }}</div>
+                        <div v-if="!liveLines.length" class="grey--text">No data yet.</div>
+                      </div>
+                    </v-card-text>
+                  </v-card>
+                </v-col>
+                <v-col cols="12" md="6">
+                  <v-card outlined>
+                    <v-card-title class="py-2 subtitle-1 primary--text">Latest reading</v-card-title>
+                    <v-card-text>
+                      <v-simple-table dense v-if="lastParsed">
+                        <tbody>
+                          <tr><td>Field (nT)</td><td class="font-weight-medium">{{ lastParsed.field_nt }}</td></tr>
+                          <tr><td>Signal</td><td>{{ lastParsed.signal }}</td></tr>
+                          <tr><td>Depth (m)</td><td>{{ lastParsed.depth_m != null ? lastParsed.depth_m : '—' }}</td></tr>
+                          <tr><td>Quality</td><td>{{ lastParsed.quality != null ? lastParsed.quality : '—' }}</td></tr>
+                          <tr><td>Leak</td><td>{{ lastParsed.leak }}</td></tr>
+                          <tr><td>Larmor (ms)</td><td>{{ lastParsed.larmor_ms }}</td></tr>
+                          <tr><td>GPS lat</td><td>{{ gpsLat != null ? gpsLat.toFixed(7) : '—' }}</td></tr>
+                          <tr><td>GPS lon</td><td>{{ gpsLon != null ? gpsLon.toFixed(7) : '—' }}</td></tr>
+                        </tbody>
+                      </v-simple-table>
+                      <div v-else class="grey--text">Connect and wait for a valid sentence.</div>
+                    </v-card-text>
+                  </v-card>
+                </v-col>
+              </v-row>
+            </v-tab-item>
+
+            <v-tab-item>
+              <v-card outlined>
+                <v-card-title class="primary--text py-2">CSV logs</v-card-title>
+                <v-card-text>
+                  <v-btn small color="primary" depressed class="mb-3" @click="loadLogs" :loading="logsLoading">
+                    <v-icon left small>mdi-refresh</v-icon>Refresh
+                  </v-btn>
+                  <v-data-table
+                    item-key="name"
+                    :headers="logHeaders"
+                    :items="logs"
+                    :items-per-page="10"
+                    class="elevation-0"
+                    dense
+                  >
+                    <template v-slot:item.current="{ item }">
+                      <v-chip v-if="item.current" x-small color="primary" text-color="white">current</v-chip>
+                    </template>
+                    <template v-slot:item.size_bytes="{ item }">
+                      {{ formatBytes(item.size_bytes) }}
+                    </template>
+                    <template v-slot:item.mtime="{ item }">
+                      {{ formatTime(item.mtime) }}
+                    </template>
+                    <template v-slot:item.row_count="{ item }">
+                      {{ item.row_count != null ? item.row_count : '—' }}
+                    </template>
+                    <template v-slot:item.actions="{ item }">
+                      <v-btn x-small text color="primary" :href="'/api/logs/' + encodeURIComponent(item.name)" download>Download</v-btn>
+                      <v-btn x-small text color="error" :disabled="item.current" @click="deleteLog(item)">Delete</v-btn>
+                    </template>
+                  </v-data-table>
+                </v-card-text>
+              </v-card>
+            </v-tab-item>
+          </v-tabs-items>
+        </v-container>
+      </v-main>
+    </v-app>
+  </div>
+
+  <script src="/static/vendor/js/vue.min.js"></script>
+  <script src="/static/vendor/js/vuetify.min.js"></script>
+  <script src="/static/vendor/js/axios.min.js"></script>
+  <script>
+    Vue.use(Vuetify);
+    const navy = '#0a2540';
+    new Vue({
+      el: '#app',
+      vuetify: new Vuetify({
+        theme: {
+          themes: {
+            light: {
+              primary: navy,
+              secondary: '#e6ecf2',
+              anchor: navy,
+            },
+          },
+        },
+      }),
+      data() {
+        return {
+          tab: 0,
+          busy: false,
+          portsLoading: false,
+          logsLoading: false,
+          baudChoices: [1200, 2400, 4800, 9600, 19200],
+          baudRate: 9600,
+          ports: [],
+          selectedPort: '',
+          connected: false,
+          liveLines: [],
+          lastParsed: null,
+          gpsLat: null,
+          gpsLon: null,
+          gpsAlt: null,
+          gpsOk: false,
+          nvfPostsOk: 0,
+          nvfLastStatus: 'idle',
+          nvfLastEndpoint: null,
+          currentLog: null,
+          alertMsg: '',
+          logs: [],
+          logHeaders: [
+            { text: '', value: 'current', width: '80px' },
+            { text: 'File', value: 'name' },
+            { text: 'Size', value: 'size_bytes' },
+            { text: 'Modified', value: 'mtime' },
+            { text: 'Rows', value: 'row_count' },
+            { text: '', value: 'actions', sortable: false },
+          ],
+          es: null,
+          saveTimer: null,
+        };
+      },
+      computed: {
+        portItems() {
+          return (this.ports || []).map((p) => ({
+            device: p.device,
+            label: p.by_id ? `${p.device} (${p.by_id})` : `${p.device} — ${p.description || ''}`,
+          }));
+        },
+        gpsLabel() {
+          if (this.gpsLat == null || this.gpsLon == null) return 'no fix';
+          return 'fix';
+        },
+      },
+      mounted() {
+        this.fetchPorts();
+        this.loadSettings();
+        this.startSSE();
+        this.pollStatus();
+      },
+      beforeDestroy() {
+        if (this.es) this.es.close();
+      },
+      methods: {
+        async fetchPorts() {
+          this.portsLoading = true;
+          try {
+            const r = await axios.get('/api/serial/ports');
+            this.ports = r.data.ports || [];
+          } catch (e) {
+            this.alertMsg = 'Failed to list serial ports';
+          } finally {
+            this.portsLoading = false;
+          }
+        },
+        async loadSettings() {
+          try {
+            const r = await axios.get('/api/settings');
+            this.selectedPort = r.data.port || '';
+            this.baudRate = r.data.baud_rate || 9600;
+          } catch (e) { /* ignore */ }
+        },
+        saveSettingsDebounced() {
+          if (this.saveTimer) clearTimeout(this.saveTimer);
+          this.saveTimer = setTimeout(() => this.saveSettings(), 400);
+        },
+        async saveSettings() {
+          try {
+            await axios.post('/api/settings', { port: this.selectedPort, baud_rate: this.baudRate });
+          } catch (e) { /* ignore */ }
+        },
+        async connect() {
+          this.alertMsg = '';
+          this.busy = true;
+          try {
+            await this.saveSettings();
+            const r = await axios.post('/api/connect', {
+              port: this.selectedPort,
+              baud_rate: this.baudRate,
+            });
+            if (!r.data.ok) throw new Error(r.data.error || 'connect failed');
+          } catch (e) {
+            this.alertMsg = (e.response && e.response.data && e.response.data.error) || e.message || 'Connect failed';
+          } finally {
+            this.busy = false;
+            this.refreshStatus();
+          }
+        },
+        async disconnect() {
+          try {
+            await axios.post('/api/disconnect');
+          } catch (e) { /* ignore */ }
+          this.refreshStatus();
+        },
+        async refreshStatus() {
+          try {
+            const r = await axios.get('/api/status');
+            this.applyStatus(r.data);
+          } catch (e) { /* ignore */ }
+        },
+        applyStatus(s) {
+          this.connected = !!s.connected;
+          this.currentLog = s.current_log || null;
+          this.nvfPostsOk = s.nvf_posts_ok || 0;
+          this.nvfLastStatus = s.nvf_last_status || 'idle';
+          this.nvfLastEndpoint = s.nvf_last_endpoint || null;
+          if (s.last_lines && s.last_lines.length) {
+            this.liveLines = s.last_lines.slice().reverse();
+          }
+          if (s.last_parsed) this.lastParsed = s.last_parsed;
+          const g = s.gps || {};
+          if (g.lat != null && g.lon != null) {
+            this.gpsLat = g.lat;
+            this.gpsLon = g.lon;
+            this.gpsAlt = g.alt_m;
+          }
+          const age = s.gps_age_s;
+          this.gpsOk = age != null && age < 5;
+        },
+        pollStatus() {
+          setInterval(() => this.refreshStatus(), 3000);
+        },
+        startSSE() {
+          this.es = new EventSource('/api/events');
+          this.es.onmessage = (ev) => {
+            try {
+              const msg = JSON.parse(ev.data);
+              if (msg.type === 'init') {
+                if (msg.settings) {
+                  if (msg.settings.port) this.selectedPort = msg.settings.port;
+                  if (msg.settings.baud_rate) this.baudRate = msg.settings.baud_rate;
+                }
+                if (msg.baud_choices) this.baudChoices = msg.baud_choices;
+              } else if (msg.type === 'raw_sentence') {
+                this.liveLines.unshift(msg.line);
+                if (this.liveLines.length > 10) this.liveLines.pop();
+              } else if (msg.type === 'parsed') {
+                this.lastParsed = msg.data;
+              } else if (msg.type === 'gps') {
+                this.gpsLat = msg.lat;
+                this.gpsLon = msg.lon;
+                this.gpsAlt = msg.alt_m;
+                this.gpsOk = true;
+              } else if (msg.type === 'mavlink_ack') {
+                this.refreshStatus();
+              } else if (msg.type === 'status') {
+                this.connected = !!msg.connected;
+                if (!msg.connected) this.currentLog = null;
+                this.refreshStatus();
+              }
+            } catch (e) { /* ignore */ }
+          };
+          this.es.onerror = () => { /* browser will retry */ };
+        },
+        async loadLogs() {
+          this.logsLoading = true;
+          try {
+            const r = await axios.get('/api/logs');
+            this.logs = r.data.logs || [];
+          } catch (e) {
+            this.alertMsg = 'Failed to load logs';
+          } finally {
+            this.logsLoading = false;
+          }
+        },
+        formatBytes(n) {
+          if (n < 1024) return n + ' B';
+          if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+          return (n / 1024 / 1024).toFixed(1) + ' MB';
+        },
+        formatTime(ts) {
+          const d = new Date(ts * 1000);
+          return d.toLocaleString();
+        },
+        async deleteLog(item) {
+          if (!confirm('Delete ' + item.name + '?')) return;
+          try {
+            await axios.delete('/api/logs/' + encodeURIComponent(item.name));
+            await this.loadLogs();
+          } catch (e) {
+            this.alertMsg = (e.response && e.response.data && e.response.data.error) || 'Delete failed';
+          }
+        },
+      },
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,754 @@
+#!/usr/bin/env python3
+"""
+BlueOS extension: Marine Magnetics Explorer magnetometer reader.
+Reads serial sentences, joins GPS from Mavlink2Rest, logs CSV, sends NAMED_VALUE_FLOAT.
+"""
+from __future__ import annotations
+
+import csv
+import json
+import os
+import queue
+import re
+import threading
+import time
+from collections import deque
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import requests
+import serial
+from flask import Flask, Response, jsonify, request, send_file, send_from_directory, stream_with_context
+from flask_cors import CORS
+from serial.tools import list_ports
+from waitress import serve
+
+# -----------------------------------------------------------------------------
+# Paths & constants
+# -----------------------------------------------------------------------------
+ROOT = Path(__file__).resolve().parent
+LOG_DIR = Path(os.environ.get("LOG_DIR", "/app/logs"))
+STATE_FILENAME = "state.json"
+LOG_PREFIX = "explorer_"
+LOG_SUFFIX = ".csv"
+
+MAVLINK_BASE = os.environ.get(
+    "MAVLINK2REST_BASE", "http://host.docker.internal/mavlink2rest/mavlink"
+)
+MAVLINK_VEHICLE_ID = int(os.environ.get("MAVLINK_VEHICLE_ID", "1"))
+
+MAVLINK_POST_ENDPOINTS = [
+    "http://host.docker.internal/mavlink2rest/mavlink",
+    "http://host.docker.internal:6040/v1/mavlink",
+    "http://192.168.2.2/mavlink2rest/mavlink",
+    "http://localhost/mavlink2rest/mavlink",
+    "http://blueos.local/mavlink2rest/mavlink",
+]
+
+BOOT_MONO = time.monotonic()
+
+# Explorer default per manufacturer: 9600 8N1
+BAUD_CHOICES = [1200, 2400, 4800, 9600, 19200]
+
+# Max ~4 Hz bursts to autopilot (4 NVF per burst)
+NVF_MIN_INTERVAL_S = 0.25
+
+SENTENCE_RE = re.compile(
+    r"^\*(?P<year>\d{2})\.(?P<jday>\d{3})/"
+    r"(?P<time>\d{2}:\d{2}:\d{2}\.\d)\s+"
+    r"F:(?P<field>[-+]?\d+\.\d+)\s+"
+    r"S:(?P<signal>\d+)"
+    r"(?:\s+D:(?P<depth>[-+]?\d+\.\d+)m)?"
+    r"(?:\s+A:(?P<alt>[-+]?\d+\.\d+)m)?"
+    r"\s+L(?P<leak>\d)\s+"
+    r"(?P<larmor>\d+)ms"
+    r"(?:_Q:(?P<quality>\d+))?\s*!!!"
+)
+
+CSV_COLUMNS = [
+    "utc_time",
+    "unix_ms",
+    "year",
+    "julian_day",
+    "field_nt",
+    "signal",
+    "depth_m",
+    "altitude_m",
+    "leak",
+    "larmor_ms",
+    "quality",
+    "lat",
+    "lon",
+    "gps_alt_m",
+    "gps_age_ms",
+    "raw_sentence",
+]
+
+app = Flask(__name__, static_folder=str(ROOT / "static"), static_url_path="/static")
+CORS(app)
+
+# -----------------------------------------------------------------------------
+# Global runtime state (protected by state_lock)
+# -----------------------------------------------------------------------------
+state_lock = threading.Lock()
+sse_clients: List[queue.Queue] = []
+
+connected = False
+stop_event = threading.Event()
+serial_thread: Optional[threading.Thread] = None
+gps_thread: Optional[threading.Thread] = None
+
+ser: Optional[serial.Serial] = None
+csv_file = None
+csv_writer: Optional[csv.writer] = None
+current_log_name: Optional[str] = None
+
+raw_lines: deque = deque(maxlen=10)
+vehicle_id = MAVLINK_VEHICLE_ID
+
+gps_fix: Dict[str, Any] = {
+    "lat": None,
+    "lon": None,
+    "alt_m": None,
+    "last_ok_mono": None,
+    "last_error": None,
+}
+
+mavlink_seq = 0
+nvf_posts_ok = 0
+nvf_last_status = "idle"
+nvf_last_endpoint: Optional[str] = None
+last_parsed: Optional[Dict[str, Any]] = None
+last_nvf_burst_mono = 0.0
+
+reader_error: Optional[str] = None
+
+
+def ensure_log_dir() -> None:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def state_path() -> Path:
+    return LOG_DIR / STATE_FILENAME
+
+
+def load_settings() -> Dict[str, Any]:
+    ensure_log_dir()
+    p = state_path()
+    if not p.is_file():
+        return {"port": "", "baud_rate": 9600}
+    try:
+        with p.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        br = int(data.get("baud_rate", 9600))
+        if br not in BAUD_CHOICES:
+            br = 9600
+        return {"port": str(data.get("port", "")), "baud_rate": br}
+    except Exception:
+        return {"port": "", "baud_rate": 9600}
+
+
+def save_settings(port: str, baud_rate: int) -> None:
+    ensure_log_dir()
+    if baud_rate not in BAUD_CHOICES:
+        baud_rate = 9600
+    with state_path().open("w", encoding="utf-8") as f:
+        json.dump({"port": port, "baud_rate": baud_rate}, f, indent=2)
+
+
+def sse_broadcast(obj: Dict[str, Any]) -> None:
+    line = f"data: {json.dumps(obj)}\n\n"
+    with state_lock:
+        dead: List[queue.Queue] = []
+        for q in sse_clients:
+            try:
+                q.put_nowait(line)
+            except queue.Full:
+                dead.append(q)
+        for q in dead:
+            if q in sse_clients:
+                sse_clients.remove(q)
+
+
+def parse_sentence(raw: str) -> Optional[Dict[str, Any]]:
+    m = SENTENCE_RE.match(raw.strip())
+    if not m:
+        return None
+    g = m.groupdict()
+    depth = g.get("depth")
+    alt = g.get("alt")
+    qual = g.get("quality")
+    return {
+        "year": g["year"],
+        "julian_day": g["jday"],
+        "sensor_time": g["time"],
+        "field_nt": float(g["field"]),
+        "signal": int(g["signal"]),
+        "depth_m": float(depth) if depth is not None else None,
+        "altitude_m": float(alt) if alt is not None else None,
+        "leak": int(g["leak"]),
+        "larmor_ms": int(g["larmor"]),
+        "quality": int(qual) if qual is not None else None,
+    }
+
+
+def mavlink_sequence_next() -> int:
+    global mavlink_seq
+    with state_lock:
+        mavlink_seq = (mavlink_seq + 1) % 256
+        return mavlink_seq
+
+
+def build_nvf_payload(name: str, value: float, seq: int) -> Dict[str, Any]:
+    name_array: List[str] = []
+    for i in range(10):
+        if i < len(name):
+            name_array.append(name[i])
+        else:
+            name_array.append("\u0000")
+    time_boot_ms = int((time.monotonic() - BOOT_MONO) * 1000) & 0xFFFFFFFF
+    return {
+        "header": {"system_id": 255, "component_id": 0, "sequence": seq},
+        "message": {
+            "type": "NAMED_VALUE_FLOAT",
+            "time_boot_ms": time_boot_ms,
+            "value": float(value),
+            "name": name_array,
+        },
+    }
+
+
+def send_named_value_float(name: str, value: float) -> Tuple[bool, Optional[str]]:
+    """POST NAMED_VALUE_FLOAT to Mavlink2Rest; try endpoints in order."""
+    seq = mavlink_sequence_next()
+    payload = build_nvf_payload(name, value, seq)
+    for post_url in MAVLINK_POST_ENDPOINTS:
+        try:
+            r = requests.post(post_url, json=payload, timeout=2.0)
+            if r.status_code == 200:
+                return True, post_url
+        except Exception:
+            continue
+    return False, None
+
+
+def send_nvf_burst(field_nt: float, signal: int, depth_m: Optional[float], quality: Optional[int]) -> None:
+    """Send four NVFs; update counters and SSE."""
+    global nvf_posts_ok, nvf_last_status, nvf_last_endpoint
+
+    depth_val = float(depth_m) if depth_m is not None else 0.0
+    qual_val = float(quality) if quality is not None else 0.0
+
+    specs = [
+        ("MAG_NT", field_nt),
+        ("MAG_SIG", float(signal)),
+        ("MAG_DEPTH", depth_val),
+        ("MAG_QUAL", qual_val),
+    ]
+    ok_any = False
+    last_url: Optional[str] = None
+    for n, v in specs:
+        ok, url = send_named_value_float(n, v)
+        if ok:
+            ok_any = True
+            last_url = url
+            with state_lock:
+                nvf_posts_ok += 1
+        else:
+            with state_lock:
+                nvf_last_status = f"failed:{n}"
+                nvf_last_endpoint = None
+            sse_broadcast({"type": "mavlink_ack", "ok": False, "name": n})
+            return
+
+    with state_lock:
+        nvf_last_status = "ok"
+        nvf_last_endpoint = last_url
+    sse_broadcast({"type": "mavlink_ack", "ok": ok_any, "endpoint": last_url, "names": [s[0] for s in specs]})
+
+
+def detect_vehicle_id() -> int:
+    try:
+        r = requests.get(f"{MAVLINK_BASE.rstrip('/')}/vehicles", timeout=1.5)
+        if r.status_code != 200:
+            return MAVLINK_VEHICLE_ID
+        data = r.json()
+        if isinstance(data, list) and data:
+            first = data[0]
+            if isinstance(first, dict):
+                return int(first.get("id", first.get("system_id", MAVLINK_VEHICLE_ID)))
+            return int(first)
+        if isinstance(data, dict):
+            vehicles = data.get("vehicles") or data.get("data") or data.get("items")
+            if isinstance(vehicles, list) and vehicles:
+                v0 = vehicles[0]
+                if isinstance(v0, dict):
+                    return int(v0.get("id", v0.get("system_id", MAVLINK_VEHICLE_ID)))
+    except Exception:
+        pass
+    return MAVLINK_VEHICLE_ID
+
+
+def gps_poll_loop() -> None:
+    global vehicle_id, gps_fix
+    vid = detect_vehicle_id()
+    with state_lock:
+        vehicle_id = vid
+    url = f"{MAVLINK_BASE.rstrip('/')}/vehicles/{vid}/components/1/messages/GLOBAL_POSITION_INT"
+    while not stop_event.is_set():
+        try:
+            r = requests.get(url, timeout=1.0)
+            if r.status_code == 200:
+                body = r.json()
+                msg = body.get("message") or body
+                lat_e7 = msg.get("lat")
+                lon_e7 = msg.get("lon")
+                alt_e7 = msg.get("alt")
+                if lat_e7 is not None and lon_e7 is not None:
+                    lat_deg = float(lat_e7) / 1e7
+                    lon_deg = float(lon_e7) / 1e7
+                    alt_m = float(alt_e7) / 1e7 if alt_e7 is not None else None
+                    with state_lock:
+                        gps_fix["lat"] = lat_deg
+                        gps_fix["lon"] = lon_deg
+                        gps_fix["alt_m"] = alt_m
+                        gps_fix["last_ok_mono"] = time.monotonic()
+                        gps_fix["last_error"] = None
+                    sse_broadcast(
+                        {
+                            "type": "gps",
+                            "lat": lat_deg,
+                            "lon": lon_deg,
+                            "alt_m": alt_m,
+                        }
+                    )
+                else:
+                    with state_lock:
+                        gps_fix["last_error"] = "no lat/lon in message"
+            else:
+                with state_lock:
+                    gps_fix["last_error"] = f"HTTP {r.status_code}"
+        except Exception as e:
+            with state_lock:
+                gps_fix["last_error"] = str(e)
+        stop_event.wait(0.5)
+
+
+def open_csv_log() -> Tuple[str, Path]:
+    ensure_log_dir()
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    name = f"{LOG_PREFIX}{ts}{LOG_SUFFIX}"
+    path = LOG_DIR / name
+    return name, path
+
+
+def write_csv_row(parsed: Dict[str, Any], raw: str, unix_ms: int, utc_time: str) -> None:
+    global csv_writer
+    with state_lock:
+        lat = gps_fix["lat"]
+        lon = gps_fix["lon"]
+        alt_m = gps_fix["alt_m"]
+        last_ok = gps_fix["last_ok_mono"]
+    age_ms = ""
+    if last_ok is not None:
+        age_ms = int((time.monotonic() - last_ok) * 1000)
+    row = [
+        utc_time,
+        unix_ms,
+        parsed["year"],
+        parsed["julian_day"],
+        parsed["field_nt"],
+        parsed["signal"],
+        parsed["depth_m"] if parsed["depth_m"] is not None else "",
+        parsed["altitude_m"] if parsed["altitude_m"] is not None else "",
+        parsed["leak"],
+        parsed["larmor_ms"],
+        parsed["quality"] if parsed["quality"] is not None else "",
+        lat if lat is not None else "",
+        lon if lon is not None else "",
+        alt_m if alt_m is not None else "",
+        age_ms,
+        raw,
+    ]
+    with state_lock:
+        if csv_writer is None:
+            return
+        csv_writer.writerow(row)
+        if csv_file:
+            csv_file.flush()
+
+
+def serial_read_loop(port: str, baud: int) -> None:
+    global ser, connected, reader_error, last_parsed, last_nvf_burst_mono, raw_lines, csv_file, csv_writer, current_log_name
+
+    reader_error = None
+    try:
+        ser = serial.Serial(port=port, baudrate=baud, timeout=1.0, bytesize=serial.EIGHTBITS, parity=serial.PARITY_NONE, stopbits=serial.STOPBITS_ONE)
+    except Exception as e:
+        reader_error = str(e)
+        stop_event.set()
+        with state_lock:
+            connected = False
+        sse_broadcast({"type": "status", "connected": False, "error": reader_error})
+        return
+
+    log_name, log_path = open_csv_log()
+    try:
+        log_fp = open(log_path, "a", newline="", encoding="utf-8")
+        log_writer = csv.writer(log_fp)
+        log_writer.writerow(CSV_COLUMNS)
+        log_fp.flush()
+    except Exception as e:
+        reader_error = f"Cannot create log file: {e}"
+        stop_event.set()
+        try:
+            ser.close()
+        except Exception:
+            pass
+        ser = None
+        with state_lock:
+            connected = False
+        sse_broadcast({"type": "status", "connected": False, "error": reader_error})
+        return
+
+    with state_lock:
+        current_log_name = log_name
+        csv_file = log_fp
+        csv_writer = log_writer
+        connected = True
+
+    sse_broadcast({"type": "status", "connected": True, "log": log_name, "port": port, "baud": baud})
+
+    while not stop_event.is_set() and ser and ser.is_open:
+        try:
+            line_b = ser.readline()
+            if not line_b:
+                continue
+            raw = line_b.decode("utf-8", errors="replace").strip()
+            if not raw:
+                continue
+            unix_ms = int(time.time() * 1000)
+            utc_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            with state_lock:
+                raw_lines.append(raw)
+            sse_broadcast({"type": "raw_sentence", "line": raw})
+
+            parsed = parse_sentence(raw)
+            if not parsed:
+                continue
+
+            with state_lock:
+                last_parsed = {**parsed, "raw": raw, "unix_ms": unix_ms, "utc_time": utc_time}
+
+            write_csv_row(parsed, raw, unix_ms, utc_time)
+            sse_broadcast({"type": "parsed", "data": last_parsed})
+
+            now_m = time.monotonic()
+            if now_m - last_nvf_burst_mono >= NVF_MIN_INTERVAL_S:
+                last_nvf_burst_mono = now_m
+                send_nvf_burst(
+                    parsed["field_nt"],
+                    parsed["signal"],
+                    parsed["depth_m"],
+                    parsed["quality"],
+                )
+        except Exception as e:
+            reader_error = str(e)
+            sse_broadcast({"type": "status", "connected": True, "serial_error": reader_error})
+            time.sleep(0.1)
+
+    # cleanup serial + csv
+    try:
+        if ser and ser.is_open:
+            ser.close()
+    except Exception:
+        pass
+    ser = None
+    try:
+        if csv_file:
+            csv_file.close()
+    except Exception:
+        pass
+    with state_lock:
+        csv_file = None
+        csv_writer = None
+        current_log_name = None
+        connected = False
+    sse_broadcast({"type": "status", "connected": False})
+
+
+def list_serial_ports() -> List[Dict[str, Any]]:
+    out: Dict[str, Dict[str, str]] = {}
+    for p in list_ports.comports():
+        dev = p.device
+        out[dev] = {"device": dev, "description": p.description or "", "hwid": p.hwid or ""}
+    by_id = Path("/dev/serial/by-id")
+    if by_id.is_dir():
+        for link in sorted(by_id.iterdir()):
+            if link.is_symlink() or link.is_file():
+                try:
+                    target = os.path.realpath(str(link))
+                    if target not in out:
+                        out[target] = {"device": target, "description": link.name, "hwid": "by-id"}
+                    else:
+                        out[target]["by_id"] = link.name
+                except Exception:
+                    pass
+    return sorted(out.values(), key=lambda x: x["device"])
+
+
+def safe_log_name(name: str) -> Optional[Path]:
+    if not name or "/" in name or "\\" in name or name.startswith("."):
+        return None
+    if not (name.startswith(LOG_PREFIX) and name.endswith(LOG_SUFFIX)):
+        return None
+    path = (LOG_DIR / name).resolve()
+    try:
+        path.relative_to(LOG_DIR.resolve())
+    except ValueError:
+        return None
+    return path
+
+
+# -----------------------------------------------------------------------------
+# Flask routes
+# -----------------------------------------------------------------------------
+@app.route("/register_service")
+def register_service():
+    return jsonify(
+        {
+            "name": "Marine Magnetics Explorer",
+            "description": "USB serial Explorer data with GPS; CSV logs and NAMED_VALUE_FLOAT to autopilot.",
+            "icon": "mdi-magnet",
+            "company": "Blue Robotics",
+            "version": "1.0.0",
+            "webpage": "https://github.com/vshie/BlueOS-Marine-Magnetics-Explorer",
+            "api": "https://github.com/vshie/BlueOS-Marine-Magnetics-Explorer",
+        }
+    )
+
+
+@app.route("/")
+def index_page():
+    return send_from_directory(app.static_folder, "index.html")
+
+
+@app.route("/api/serial/ports")
+def api_serial_ports():
+    return jsonify({"ports": list_serial_ports()})
+
+
+@app.route("/api/settings", methods=["GET"])
+def api_settings_get():
+    s = load_settings()
+    return jsonify(s)
+
+
+@app.route("/api/settings", methods=["POST"])
+def api_settings_post():
+    data = request.get_json(force=True, silent=True) or {}
+    port = str(data.get("port", ""))
+    baud = int(data.get("baud_rate", 9600))
+    if baud not in BAUD_CHOICES:
+        return jsonify({"ok": False, "error": "invalid baud_rate"}), 400
+    save_settings(port, baud)
+    return jsonify({"ok": True, "port": port, "baud_rate": baud})
+
+
+@app.route("/api/status")
+def api_status():
+    with state_lock:
+        lines = list(raw_lines)
+        lp = dict(last_parsed) if last_parsed else None
+        gf = dict(gps_fix)
+        cur = current_log_name
+        nvf_ok = nvf_posts_ok
+        nvf_st = nvf_last_status
+        nvf_ep = nvf_last_endpoint
+        conn = connected
+        vid = vehicle_id
+        err = reader_error
+    gps_age_s: Optional[float] = None
+    if gf.get("last_ok_mono") is not None:
+        gps_age_s = time.monotonic() - float(gf["last_ok_mono"])
+    return jsonify(
+        {
+            "connected": conn,
+            "vehicle_id": vid,
+            "current_log": cur,
+            "last_lines": lines,
+            "last_parsed": lp,
+            "gps": gf,
+            "gps_age_s": gps_age_s,
+            "nvf_posts_ok": nvf_ok,
+            "nvf_last_status": nvf_st,
+            "nvf_last_endpoint": nvf_ep,
+            "reader_error": err,
+        }
+    )
+
+
+@app.route("/api/connect", methods=["POST"])
+def api_connect():
+    global serial_thread, gps_thread, stop_event, reader_error, last_nvf_burst_mono
+
+    with state_lock:
+        if connected:
+            return jsonify({"ok": False, "error": "already connected"}), 400
+
+    data = request.get_json(force=True, silent=True) or {}
+    port = str(data.get("port", "")).strip()
+    baud = int(data.get("baud_rate", load_settings()["baud_rate"]))
+    if baud not in BAUD_CHOICES:
+        return jsonify({"ok": False, "error": "invalid baud_rate"}), 400
+    if not port:
+        return jsonify({"ok": False, "error": "port required"}), 400
+
+    save_settings(port, baud)
+
+    stop_event.clear()
+    reader_error = None
+    last_nvf_burst_mono = 0.0
+
+    gps_thread = threading.Thread(target=gps_poll_loop, name="gps", daemon=True)
+    gps_thread.start()
+
+    serial_thread = threading.Thread(target=serial_read_loop, args=(port, baud), name="serial", daemon=True)
+    serial_thread.start()
+
+    # brief wait to catch immediate open errors
+    time.sleep(0.15)
+    with state_lock:
+        err = reader_error
+        ok = connected
+    if err and not ok:
+        stop_event.set()
+        if gps_thread:
+            gps_thread.join(timeout=2.0)
+        if serial_thread:
+            serial_thread.join(timeout=2.0)
+        return jsonify({"ok": False, "error": err}), 400
+
+    return jsonify({"ok": True, "port": port, "baud_rate": baud})
+
+
+@app.route("/api/disconnect", methods=["POST"])
+def api_disconnect():
+    global stop_event, serial_thread, gps_thread
+
+    stop_event.set()
+    t_ser = serial_thread
+    t_gps = gps_thread
+    if t_ser:
+        t_ser.join(timeout=5.0)
+    if t_gps:
+        t_gps.join(timeout=2.0)
+    serial_thread = None
+    gps_thread = None
+    stop_event = threading.Event()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/events")
+def api_events():
+    def gen():
+        q: queue.Queue = queue.Queue(maxsize=100)
+        with state_lock:
+            sse_clients.append(q)
+        try:
+            init = {
+                "type": "init",
+                "baud_choices": BAUD_CHOICES,
+                "settings": load_settings(),
+            }
+            yield f"data: {json.dumps(init)}\n\n"
+            while True:
+                try:
+                    item = q.get(timeout=20.0)
+                    yield item
+                except queue.Empty:
+                    yield ": ping\n\n"
+        finally:
+            with state_lock:
+                if q in sse_clients:
+                    sse_clients.remove(q)
+
+    return Response(
+        stream_with_context(gen()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
+
+
+def _csv_line_count(path: Path) -> Optional[int]:
+    try:
+        size = path.stat().st_size
+        if size > 50 * 1024 * 1024:
+            return None
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            n = sum(1 for _ in f)
+        return max(0, n - 1)
+    except Exception:
+        return None
+
+
+@app.route("/api/logs")
+def api_logs():
+    ensure_log_dir()
+    items = []
+    with state_lock:
+        cur = current_log_name
+    for p in sorted(LOG_DIR.glob(f"{LOG_PREFIX}*{LOG_SUFFIX}"), key=lambda x: x.stat().st_mtime, reverse=True):
+        st = p.stat()
+        items.append(
+            {
+                "name": p.name,
+                "size_bytes": st.st_size,
+                "mtime": st.st_mtime,
+                "row_count": _csv_line_count(p),
+                "current": p.name == cur,
+            }
+        )
+    return jsonify({"logs": items})
+
+
+@app.route("/api/logs/<name>")
+def api_log_download(name: str):
+    path = safe_log_name(name)
+    if not path or not path.is_file():
+        return jsonify({"ok": False, "error": "not found"}), 404
+    return send_file(
+        path,
+        mimetype="text/csv",
+        as_attachment=True,
+        download_name=name,
+        cache_timeout=0,
+    )
+
+
+@app.route("/api/logs/<name>", methods=["DELETE"])
+def api_log_delete(name: str):
+    path = safe_log_name(name)
+    if not path or not path.is_file():
+        return jsonify({"ok": False, "error": "not found"}), 404
+    with state_lock:
+        if current_log_name == name:
+            return jsonify({"ok": False, "error": "cannot delete active log"}), 400
+    try:
+        path.unlink()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+def main() -> None:
+    ensure_log_dir()
+    port = int(os.environ.get("PORT", "9091"))
+    print(f"Marine Magnetics Explorer extension listening on 0.0.0.0:{port}", flush=True)
+    serve(app, host="0.0.0.0", port=port, threads=8)
+
+
+if __name__ == "__main__":
+    main()
