@@ -10,6 +10,8 @@ BlueOS extension for a **Marine Magnetics Explorer** towed magnetometer. It:
 
 The UI (Vue 2 + Vuetify) and fonts/scripts are **vendored in the Docker image** at build time so the vehicle does not need internet at runtime.
 
+Pushes to `main` run the **Deploy BlueOS Extension** workflow and publish the Docker image when secrets are configured.
+
 ## BlueOS install
 
 1. Extensions Manager → **+ Manual install** (or equivalent).
