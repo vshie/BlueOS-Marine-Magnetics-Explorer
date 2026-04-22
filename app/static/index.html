@@ -58,7 +58,10 @@
       <v-app-bar app flat color="white" class="elevation-1" style="border-bottom: 2px solid #0a2540;">
         <v-toolbar-title class="primary--text font-weight-bold">Marine Magnetics Explorer</v-toolbar-title>
         <v-spacer></v-spacer>
-        <v-chip small outlined color="primary" v-if="connected"><v-icon left small>mdi-serial-port</v-icon>Serial</v-chip>
+        <v-chip small outlined color="primary" v-if="connected">
+          <v-icon left small>{{ simulation ? 'mdi-flask' : 'mdi-serial-port' }}</v-icon>
+          {{ simulation ? 'Simulation' : 'Serial' }}
+        </v-chip>
         <v-chip small outlined :color="gpsOk ? 'success' : 'grey'" class="ml-1">
           <v-icon left small>mdi-crosshairs-gps</v-icon>GPS {{ gpsLabel }}
         </v-chip>
@@ -107,6 +110,15 @@
                 <v-col cols="12" md="5" class="d-flex flex-wrap align-center" style="gap: 8px;">
                   <v-btn color="primary" depressed :loading="busy" :disabled="connected" @click="connect">
                     <v-icon left>mdi-connection</v-icon>Connect
+                  </v-btn>
+                  <v-btn
+                    color="primary"
+                    outlined
+                    :loading="simBusy"
+                    :disabled="connected"
+                    @click="startSimulation"
+                  >
+                    <v-icon left>mdi-flask-outline</v-icon>Simulation
                   </v-btn>
                   <v-btn color="primary" outlined :disabled="!connected" @click="disconnect">
                     <v-icon left>mdi-stop</v-icon>Disconnect
@@ -196,7 +208,7 @@
                   <v-alert v-if="alertMsg" dense outlined type="error" dismissible @input="alertMsg = ''">{{ alertMsg }}</v-alert>
                   <div class="d-flex flex-wrap" style="gap: 8px;">
                     <v-chip small :color="connected ? 'success' : 'grey'" text-color="white">
-                      {{ connected ? 'Serial connected' : 'Serial idle' }}
+                      {{ !connected ? 'Serial idle' : (simulation ? 'Simulation active (no USB)' : 'Serial connected') }}
                     </v-chip>
                     <v-chip small outlined color="primary">NVF last: {{ nvfLastStatus }}</v-chip>
                     <v-chip v-if="nvfLastEndpoint" small outlined>{{ nvfLastEndpoint }}</v-chip>
@@ -304,6 +316,8 @@
         return {
           tab: 0,
           busy: false,
+          simBusy: false,
+          simulation: false,
           portsLoading: false,
           logsLoading: false,
           baudChoices: [1200, 2400, 4800, 9600, 19200],
@@ -432,6 +446,19 @@
             this.refreshStatus();
           }
         },
+        async startSimulation() {
+          this.alertMsg = '';
+          this.simBusy = true;
+          try {
+            const r = await axios.post('/api/connect', { simulate: true });
+            if (!r.data.ok) throw new Error(r.data.error || 'simulation failed');
+          } catch (e) {
+            this.alertMsg = (e.response && e.response.data && e.response.data.error) || e.message || 'Simulation failed';
+          } finally {
+            this.simBusy = false;
+            this.refreshStatus();
+          }
+        },
         async disconnect() {
           try {
             await axios.post('/api/disconnect');
@@ -446,6 +473,7 @@
         },
         applyStatus(s) {
           this.connected = !!s.connected;
+          this.simulation = !!s.simulation;
           this.currentLog = s.current_log || null;
           this.nvfPostsOk = s.nvf_posts_ok || 0;
           this.nvfLastStatus = s.nvf_last_status || 'idle';
@@ -491,6 +519,7 @@
                 this.refreshStatus();
               } else if (msg.type === 'status') {
                 this.connected = !!msg.connected;
+                this.simulation = !!msg.simulate;
                 if (!msg.connected) this.currentLog = null;
                 this.refreshStatus();
               }
