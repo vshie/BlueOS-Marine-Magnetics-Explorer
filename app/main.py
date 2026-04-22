@@ -86,6 +86,123 @@ CSV_COLUMNS = [
     "raw_sentence",
 ]
 
+# BlueOS-style path-to-position map (aligned with Airmar-WX). Longest keys first.
+_USB_PATH_POSITION_MAP = sorted(
+    [
+        ("platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.3", "top-left"),
+        ("platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.4", "bottom-left"),
+        ("platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.1", "top-right"),
+        ("platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.2", "bottom-right"),
+        ("-usb-0:1.1.3", "top-left"),
+        ("-usb-0:1.1.2", "bottom-left"),
+        ("-usb-0:1.1.4", "bottom-left"),
+        ("-usb-0:1.3:", "top-right"),
+        ("-usb-0:1.3-", "top-right"),
+        ("-usb-0:1.2:", "bottom-right"),
+        ("-usb-0:1.2-", "bottom-right"),
+        ("-usb-0:1.4", "bottom-left"),
+        ("-usb-0:1.1", "top-right"),
+        ("platform-3f980000.usb-usb-0:1.5:1", "bottom-right"),
+        ("platform-3f980000.usb-usb-0:1.4:1", "top-right"),
+        ("platform-3f980000.usb-usb-0:1.3:1", "bottom-left"),
+        ("platform-3f980000.usb-usb-0:1.2:1", "top-left"),
+        ("platform-xhci-hcd.1-usb-0:2", "bottom-right"),
+        ("platform-xhci-hcd.0-usb-0:2", "top-right"),
+        ("platform-xhci-hcd.1-usb-0:1", "top-left"),
+        ("platform-xhci-hcd.0-usb-0:1", "bottom-left"),
+    ],
+    key=lambda p: -len(p[0]),
+)
+
+
+def parse_usb_port(path_name: str) -> Dict[str, Any]:
+    """Map /dev/serial/by-path symlink name to physical USB slot (BlueOS / Pi layouts)."""
+    try:
+        usb_root = path_name.split("-port0")[0] if path_name else ""
+        bus_match = re.search(r"usb-(\d+:\d+(?:\.\d+)*)", path_name or "")
+        bus_path = bus_match.group(1) if bus_match else (usb_root or "")
+
+        hub_info: Optional[str] = None
+        hub_match = re.search(r"usb-0:(?:[0-9]+\.)+([0-9]+):1\.0", path_name or "")
+        if hub_match:
+            hub_info = f"Via hub, port {hub_match.group(1)}"
+
+        for key, position in _USB_PATH_POSITION_MAP:
+            if key in usb_root:
+                label = position.replace("-", " ").title()
+                result: Dict[str, Any] = {
+                    "position": position,
+                    "label": label,
+                    "type": "usb3" if "right" in position else "usb2",
+                    "bus": bus_path,
+                }
+                if hub_info:
+                    result["hub_info"] = hub_info
+                return result
+
+        result = {"position": "unknown", "label": "Unknown", "type": "unknown", "bus": bus_path}
+        if hub_info:
+            result["hub_info"] = hub_info
+        return result
+    except Exception:
+        return {"position": "unknown", "label": "Unknown", "type": "unknown", "bus": ""}
+
+
+def get_device_ids() -> List[Dict[str, Any]]:
+    """Serial devices under /dev/serial/by-id with USB port hints from /dev/serial/by-path."""
+    devices: List[Dict[str, Any]] = []
+    by_path_map: Dict[str, Dict[str, Any]] = {}
+    try:
+        serial_by_path = Path("/dev/serial/by-path")
+        if serial_by_path.is_dir():
+            for link in serial_by_path.iterdir():
+                try:
+                    if link.is_symlink():
+                        real_device = str(link.resolve())
+                        path_name = link.name
+                        usb_port = parse_usb_port(path_name)
+                        by_path_map[real_device] = {"path_name": path_name, "usb_port": usb_port}
+                except OSError:
+                    continue
+    except OSError:
+        pass
+
+    try:
+        serial_by_id = Path("/dev/serial/by-id")
+        if serial_by_id.is_dir():
+            for link in serial_by_id.iterdir():
+                try:
+                    if link.is_symlink():
+                        real_device = str(link.resolve())
+                        by_id_name = link.name
+                        display_name = (
+                            by_id_name.replace("usb-", "")
+                            .replace("-if00-port0", "")
+                            .replace("_", " ")
+                        )
+                        path_info = by_path_map.get(real_device, {})
+                        usb_port = path_info.get(
+                            "usb_port",
+                            {"position": "unknown", "label": "Unknown", "type": "unknown"},
+                        )
+                        devices.append(
+                            {
+                                "device": real_device,
+                                "by_id_name": by_id_name,
+                                "display_name": display_name,
+                                "usb_port": usb_port,
+                                "path_name": path_info.get("path_name", ""),
+                            }
+                        )
+                except OSError:
+                    continue
+    except OSError:
+        pass
+
+    devices.sort(key=lambda x: x["device"])
+    return devices
+
+
 app = Flask(__name__, static_folder=str(ROOT / "static"), static_url_path="/static")
 CORS(app)
 
@@ -540,6 +657,11 @@ def index_page():
 @app.route("/api/serial/ports")
 def api_serial_ports():
     return jsonify({"ports": list_serial_ports()})
+
+
+@app.route("/api/serial/device-ids", methods=["GET"])
+def api_serial_device_ids():
+    return jsonify({"devices": get_device_ids()})
 
 
 @app.route("/api/settings", methods=["GET"])

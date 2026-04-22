@@ -13,6 +13,43 @@
     .sentence-scroll { max-height: 220px; overflow-y: auto; border: 1px solid #e6ecf2; border-radius: 4px; padding: 8px; background: #fafbfc; }
     .sentence-line { padding: 4px 0; border-bottom: 1px solid #eef2f6; word-break: break-all; }
     .sentence-line:last-child { border-bottom: none; }
+    .device-id-panel { border: 1px solid #e6ecf2; border-radius: 4px; }
+    .device-id-panel .v-expansion-panel-header { min-height: 40px; }
+    .device-id-table { background: #fafbfc; }
+    .device-id-table th { font-size: 11px !important; font-weight: 600; color: #5c6b7a; }
+    .device-id-table td { font-size: 12px; }
+    .device-id-table code { background: #e6ecf2; padding: 2px 6px; border-radius: 3px; font-size: 11px; color: #0a2540; }
+    .device-id-table .hub-info { display: block; font-size: 10px; color: #789; }
+    .device-row { cursor: pointer; transition: background-color 0.15s; }
+    .device-row:hover { background-color: #e8eef5 !important; }
+    .usb-port-visual { flex-shrink: 0; }
+    .usb-port-grid {
+      border: 2px solid #0a2540;
+      border-radius: 4px;
+      overflow: hidden;
+      width: 80px;
+    }
+    .usb-port-row { display: flex; }
+    .usb-port-cell {
+      width: 40px;
+      height: 32px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid #cfd8e3;
+      transition: all 0.15s ease;
+    }
+    .usb-port-cell.usb2 { background-color: #fff8f0; }
+    .usb-port-cell.usb3 { background-color: #e8f0fa; }
+    .usb-port-cell.highlighted {
+      transform: scale(1.05);
+      z-index: 1;
+      box-shadow: 0 0 8px rgba(10, 37, 64, 0.55);
+    }
+    .usb-port-cell.usb2.highlighted { background-color: #c45c26; }
+    .usb-port-cell.usb3.highlighted { background-color: #0a2540; }
+    .usb-port-cell .port-type { font-size: 10px; font-weight: 600; color: #5c6b7a; }
+    .usb-port-cell.highlighted .port-type { color: #fff; }
   </style>
 </head>
 <body>
@@ -74,11 +111,85 @@
                   <v-btn color="primary" outlined :disabled="!connected" @click="disconnect">
                     <v-icon left>mdi-stop</v-icon>Disconnect
                   </v-btn>
-                  <v-btn icon color="primary" @click="fetchPorts" :loading="portsLoading" title="Refresh ports">
+                  <v-btn icon color="primary" @click="fetchPorts" :loading="portsLoading" title="Refresh ports and device list">
                     <v-icon>mdi-refresh</v-icon>
                   </v-btn>
                 </v-col>
               </v-row>
+
+              <v-expansion-panels flat class="mt-3 device-id-panel" v-model="devicePanel">
+                <v-expansion-panel>
+                  <v-expansion-panel-header class="py-2 px-3">
+                    <div class="text-body-2">
+                      <v-icon small class="mr-1" color="primary">mdi-usb</v-icon>
+                      Device identification
+                      <span v-if="!deviceIds.length" class="grey--text">(none in /dev/serial/by-id/)</span>
+                      <span v-else class="grey--text">({{ deviceIds.length }} devices)</span>
+                    </div>
+                  </v-expansion-panel-header>
+                  <v-expansion-panel-content>
+                    <div v-if="deviceIds.length" class="d-flex align-start flex-wrap" style="gap: 16px;">
+                      <div class="usb-port-visual">
+                        <div class="text-caption grey--text mb-1 text-center">USB ports</div>
+                        <div class="usb-port-grid">
+                          <div class="usb-port-row">
+                            <div class="usb-port-cell usb2" :class="{ highlighted: hoveredUsbPosition === 'top-left' }">
+                              <span class="port-type">2.0</span>
+                            </div>
+                            <div class="usb-port-cell usb3" :class="{ highlighted: hoveredUsbPosition === 'top-right' }">
+                              <span class="port-type">3.0</span>
+                            </div>
+                          </div>
+                          <div class="usb-port-row">
+                            <div
+                              class="usb-port-cell usb2"
+                              :class="{ highlighted: hoveredUsbPosition === 'bottom-left' || hoveredUsbPosition === 'left' }"
+                            >
+                              <span class="port-type">2.0</span>
+                            </div>
+                            <div class="usb-port-cell usb3" :class="{ highlighted: hoveredUsbPosition === 'bottom-right' }">
+                              <span class="port-type">3.0</span>
+                            </div>
+                          </div>
+                        </div>
+                        <div class="text-caption grey--text mt-1 text-center" style="font-size: 9px">ETH →</div>
+                      </div>
+                      <v-simple-table dense class="device-id-table flex-grow-1" style="min-width: 240px;">
+                        <template v-slot:default>
+                          <thead>
+                            <tr>
+                              <th class="text-left">Port</th>
+                              <th class="text-left">Device</th>
+                              <th class="text-left">USB path</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <tr
+                              v-for="(item, index) in deviceIds"
+                              :key="index"
+                              class="device-row"
+                              @mouseenter="onDeviceRowEnter(item)"
+                              @mouseleave="onDeviceRowLeave"
+                              @click="selectDeviceFromList(item)"
+                            >
+                              <td class="py-1"><code>{{ item.device }}</code></td>
+                              <td class="py-1">{{ item.display_name }}</td>
+                              <td class="py-1 text-caption grey--text">
+                                {{ item.usb_port ? item.usb_port.bus : '' }}
+                                <span v-if="item.usb_port && item.usb_port.hub_info" class="hub-info">({{ item.usb_port.hub_info }})</span>
+                              </td>
+                            </tr>
+                          </tbody>
+                        </template>
+                      </v-simple-table>
+                    </div>
+                    <div v-else class="text-caption grey--text pa-2">
+                      No serial devices detected in <code>/dev/serial/by-id/</code>. USB adapters may still appear under
+                      <strong>Refresh</strong> in the port list.
+                    </div>
+                  </v-expansion-panel-content>
+                </v-expansion-panel>
+              </v-expansion-panels>
 
               <v-row dense class="mt-2">
                 <v-col cols="12">
@@ -222,6 +333,9 @@
           ],
           es: null,
           saveTimer: null,
+          deviceIds: [],
+          hoveredUsbPosition: null,
+          devicePanel: 0,
         };
       },
       computed: {
@@ -249,13 +363,41 @@
         async fetchPorts() {
           this.portsLoading = true;
           try {
-            const r = await axios.get('/api/serial/ports');
-            this.ports = r.data.ports || [];
+            const [pr, dr] = await Promise.all([
+              axios.get('/api/serial/ports'),
+              axios.get('/api/serial/device-ids'),
+            ]);
+            this.ports = pr.data.ports || [];
+            this.deviceIds = dr.data.devices || [];
+            const seen = new Set(this.ports.map((p) => p.device));
+            for (const d of this.deviceIds) {
+              if (d.device && !seen.has(d.device)) {
+                seen.add(d.device);
+                this.ports.push({
+                  device: d.device,
+                  description: d.display_name || 'serial',
+                  hwid: 'by-id',
+                });
+              }
+            }
+            this.ports.sort((a, b) => (a.device || '').localeCompare(b.device || ''));
           } catch (e) {
-            this.alertMsg = 'Failed to list serial ports';
+            this.alertMsg = 'Failed to list serial ports or devices';
           } finally {
             this.portsLoading = false;
           }
+        },
+        onDeviceRowEnter(item) {
+          if (this.connected) return;
+          this.hoveredUsbPosition = item.usb_port ? item.usb_port.position : null;
+        },
+        onDeviceRowLeave() {
+          this.hoveredUsbPosition = null;
+        },
+        selectDeviceFromList(item) {
+          if (this.connected) return;
+          this.selectedPort = item.device;
+          this.saveSettingsDebounced();
         },
         async loadSettings() {
           try {
