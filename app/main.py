@@ -947,7 +947,8 @@ def api_events():
     return Response(
         stream_with_context(gen()),
         mimetype="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+        # Do not set Connection (hop-by-hop); Waitress/WSGI rejects it (PEP 3333).
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
