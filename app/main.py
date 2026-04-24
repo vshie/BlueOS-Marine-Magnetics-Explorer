@@ -52,6 +52,8 @@ BOOT_MONO = time.monotonic()
 
 # Explorer default per manufacturer: 9600 8N1
 BAUD_CHOICES = [1200, 2400, 4800, 9600, 19200]
+DEFAULT_LAYBACK_X_M = 0.0  # positive = starboard, negative = port
+DEFAULT_LAYBACK_Y_M = -5.0  # positive = forward, negative = behind / layback
 
 # Max ~4 Hz bursts to autopilot (4 NVF per burst)
 NVF_MIN_INTERVAL_S = 0.25
@@ -85,6 +87,11 @@ CSV_COLUMNS = [
     "lon",
     "gps_alt_m",
     "gps_age_ms",
+    "layback_lat",
+    "layback_lon",
+    "layback_bearing_deg",
+    "layback_x_m",
+    "layback_y_m",
     "raw_sentence",
 ]
 
@@ -236,6 +243,10 @@ gps_fix: Dict[str, Any] = {
     "last_ok_mono": None,
     "last_error": None,
 }
+gps_prev_position: Optional[Tuple[float, float]] = None
+gps_bearing_rad: Optional[float] = None
+layback_x_m = DEFAULT_LAYBACK_X_M
+layback_y_m = DEFAULT_LAYBACK_Y_M
 
 mavlink_seq = 0
 nvf_posts_ok = 0
@@ -259,24 +270,58 @@ def load_settings() -> Dict[str, Any]:
     ensure_log_dir()
     p = state_path()
     if not p.is_file():
-        return {"port": "", "baud_rate": 9600}
+        return {
+            "port": "",
+            "baud_rate": 9600,
+            "layback_x_m": DEFAULT_LAYBACK_X_M,
+            "layback_y_m": DEFAULT_LAYBACK_Y_M,
+        }
     try:
         with p.open("r", encoding="utf-8") as f:
             data = json.load(f)
         br = int(data.get("baud_rate", 9600))
         if br not in BAUD_CHOICES:
             br = 9600
-        return {"port": str(data.get("port", "")), "baud_rate": br}
+        return {
+            "port": str(data.get("port", "")),
+            "baud_rate": br,
+            "layback_x_m": float(data.get("layback_x_m", DEFAULT_LAYBACK_X_M)),
+            "layback_y_m": float(data.get("layback_y_m", DEFAULT_LAYBACK_Y_M)),
+        }
     except Exception:
-        return {"port": "", "baud_rate": 9600}
+        return {
+            "port": "",
+            "baud_rate": 9600,
+            "layback_x_m": DEFAULT_LAYBACK_X_M,
+            "layback_y_m": DEFAULT_LAYBACK_Y_M,
+        }
 
 
-def save_settings(port: str, baud_rate: int) -> None:
+def save_settings(
+    port: str,
+    baud_rate: int,
+    layback_x_m: Optional[float] = None,
+    layback_y_m: Optional[float] = None,
+) -> None:
     ensure_log_dir()
     if baud_rate not in BAUD_CHOICES:
         baud_rate = 9600
+    current = load_settings()
+    if layback_x_m is None:
+        layback_x_m = float(current.get("layback_x_m", DEFAULT_LAYBACK_X_M))
+    if layback_y_m is None:
+        layback_y_m = float(current.get("layback_y_m", DEFAULT_LAYBACK_Y_M))
     with state_path().open("w", encoding="utf-8") as f:
-        json.dump({"port": port, "baud_rate": baud_rate}, f, indent=2)
+        json.dump(
+            {
+                "port": port,
+                "baud_rate": baud_rate,
+                "layback_x_m": float(layback_x_m),
+                "layback_y_m": float(layback_y_m),
+            },
+            f,
+            indent=2,
+        )
 
 
 def sse_broadcast(obj: Dict[str, Any]) -> None:
@@ -291,6 +336,13 @@ def sse_broadcast(obj: Dict[str, Any]) -> None:
         for q in dead:
             if q in sse_clients:
                 sse_clients.remove(q)
+
+
+def apply_layback_settings(settings: Dict[str, Any]) -> None:
+    global layback_x_m, layback_y_m
+    with state_lock:
+        layback_x_m = float(settings.get("layback_x_m", DEFAULT_LAYBACK_X_M))
+        layback_y_m = float(settings.get("layback_y_m", DEFAULT_LAYBACK_Y_M))
 
 
 def parse_sentence(raw: str) -> Optional[Dict[str, Any]]:
@@ -313,6 +365,51 @@ def parse_sentence(raw: str) -> Optional[Dict[str, Any]]:
         "larmor_ms": int(g["larmor"]),
         "quality": int(qual) if qual is not None else None,
     }
+
+
+def calculate_direction(
+    prev_lat: float,
+    prev_lon: float,
+    curr_lat: float,
+    curr_lon: float,
+) -> Optional[float]:
+    """Bearing in radians from previous to current GPS point (0=north, pi/2=east)."""
+    if abs(prev_lat - curr_lat) < 1e-9 and abs(prev_lon - curr_lon) < 1e-9:
+        return None
+    dlon = curr_lon - prev_lon
+    dlat = curr_lat - prev_lat
+    return math.atan2(dlon, dlat)
+
+
+def calculate_layback_position(
+    gnss_lat: Optional[float],
+    gnss_lon: Optional[float],
+    offset_x_m: float,
+    offset_y_m: float,
+    bearing: Optional[float],
+) -> Tuple[Optional[float], Optional[float]]:
+    """Estimate towfish position using vessel GPS, lateral/longitudinal offset, and motion bearing.
+
+    Uses the BlueBoatExplorerMag.py convention:
+    x is starboard/port, y is forward/back. Instead of pyproj UTM transforms, use a local
+    meters-per-degree approximation, which is accurate enough for short layback offsets.
+    """
+    if gnss_lat is None or gnss_lon is None or bearing is None:
+        return gnss_lat, gnss_lon
+
+    cos_b = math.cos(bearing)
+    sin_b = math.sin(bearing)
+    east_offset_m = offset_x_m * cos_b + offset_y_m * sin_b
+    north_offset_m = -offset_x_m * sin_b + offset_y_m * cos_b
+
+    lat_rad = math.radians(gnss_lat)
+    meters_per_deg_lat = 111_320.0
+    meters_per_deg_lon = max(1e-6, 111_320.0 * math.cos(lat_rad))
+
+    return (
+        gnss_lat + (north_offset_m / meters_per_deg_lat),
+        gnss_lon + (east_offset_m / meters_per_deg_lon),
+    )
 
 
 def mavlink_sequence_next() -> int:
@@ -413,7 +510,7 @@ def detect_vehicle_id() -> int:
 
 
 def gps_poll_loop() -> None:
-    global vehicle_id, gps_fix
+    global vehicle_id, gps_fix, gps_prev_position, gps_bearing_rad
     vid = detect_vehicle_id()
     with state_lock:
         vehicle_id = vid
@@ -432,6 +529,16 @@ def gps_poll_loop() -> None:
                     lon_deg = float(lon_e7) / 1e7
                     alt_m = float(alt_e7) / 1e7 if alt_e7 is not None else None
                     with state_lock:
+                        if gps_prev_position is not None:
+                            new_bearing = calculate_direction(
+                                gps_prev_position[0],
+                                gps_prev_position[1],
+                                lat_deg,
+                                lon_deg,
+                            )
+                            if new_bearing is not None:
+                                gps_bearing_rad = new_bearing
+                        gps_prev_position = (lat_deg, lon_deg)
                         gps_fix["lat"] = lat_deg
                         gps_fix["lon"] = lon_deg
                         gps_fix["alt_m"] = alt_m
@@ -472,9 +579,16 @@ def write_csv_row(parsed: Dict[str, Any], raw: str, unix_ms: int, utc_time: str)
         lon = gps_fix["lon"]
         alt_m = gps_fix["alt_m"]
         last_ok = gps_fix["last_ok_mono"]
+        bearing = gps_bearing_rad
+        lb_x = layback_x_m
+        lb_y = layback_y_m
     age_ms = ""
     if last_ok is not None:
         age_ms = int((time.monotonic() - last_ok) * 1000)
+    layback_lat, layback_lon = calculate_layback_position(lat, lon, lb_x, lb_y, bearing)
+    bearing_deg = ""
+    if bearing is not None:
+        bearing_deg = (math.degrees(bearing) + 360.0) % 360.0
     row = [
         utc_time,
         unix_ms,
@@ -492,6 +606,11 @@ def write_csv_row(parsed: Dict[str, Any], raw: str, unix_ms: int, utc_time: str)
         lon if lon is not None else "",
         alt_m if alt_m is not None else "",
         age_ms,
+        layback_lat if layback_lat is not None else "",
+        layback_lon if layback_lon is not None else "",
+        bearing_deg,
+        lb_x,
+        lb_y,
         raw,
     ]
     with state_lock:
@@ -537,11 +656,27 @@ def process_incoming_sentence(raw: str) -> None:
     if not parsed:
         return
 
+    with state_lock:
+        lat = gps_fix["lat"]
+        lon = gps_fix["lon"]
+        bearing = gps_bearing_rad
+        lb_x = layback_x_m
+        lb_y = layback_y_m
+    layback_lat, layback_lon = calculate_layback_position(lat, lon, lb_x, lb_y, bearing)
+    bearing_deg = None
+    if bearing is not None:
+        bearing_deg = (math.degrees(bearing) + 360.0) % 360.0
+
     merged: Dict[str, Any] = {
         **parsed,
         "raw": raw,
         "unix_ms": unix_ms,
         "utc_time": utc_time,
+        "layback_lat": layback_lat,
+        "layback_lon": layback_lon,
+        "layback_bearing_deg": bearing_deg,
+        "layback_x_m": lb_x,
+        "layback_y_m": lb_y,
     }
     with state_lock:
         last_parsed = merged
@@ -779,18 +914,33 @@ def api_serial_device_ids():
 @app.route("/api/settings", methods=["GET"])
 def api_settings_get():
     s = load_settings()
+    apply_layback_settings(s)
     return jsonify(s)
 
 
 @app.route("/api/settings", methods=["POST"])
 def api_settings_post():
     data = request.get_json(force=True, silent=True) or {}
+    current_settings = load_settings()
     port = str(data.get("port", ""))
-    baud = int(data.get("baud_rate", 9600))
+    baud = int(data.get("baud_rate", current_settings.get("baud_rate", 9600)))
+    layback_x = float(data.get("layback_x_m", current_settings.get("layback_x_m", DEFAULT_LAYBACK_X_M)))
+    layback_y = float(data.get("layback_y_m", current_settings.get("layback_y_m", DEFAULT_LAYBACK_Y_M)))
     if baud not in BAUD_CHOICES:
         return jsonify({"ok": False, "error": "invalid baud_rate"}), 400
-    save_settings(port, baud)
-    return jsonify({"ok": True, "port": port, "baud_rate": baud})
+    save_settings(port, baud, layback_x, layback_y)
+    apply_layback_settings(
+        {"layback_x_m": layback_x, "layback_y_m": layback_y}
+    )
+    return jsonify(
+        {
+            "ok": True,
+            "port": port,
+            "baud_rate": baud,
+            "layback_x_m": layback_x,
+            "layback_y_m": layback_y,
+        }
+    )
 
 
 @app.route("/api/status")
@@ -807,6 +957,9 @@ def api_status():
         sim = simulating
         vid = vehicle_id
         err = reader_error
+        bearing = gps_bearing_rad
+        lb_x = layback_x_m
+        lb_y = layback_y_m
     gps_age_s: Optional[float] = None
     if gf.get("last_ok_mono") is not None:
         gps_age_s = time.monotonic() - float(gf["last_ok_mono"])
@@ -820,6 +973,9 @@ def api_status():
             "last_parsed": lp,
             "gps": gf,
             "gps_age_s": gps_age_s,
+            "layback_x_m": lb_x,
+            "layback_y_m": lb_y,
+            "layback_bearing_deg": (math.degrees(bearing) + 360.0) % 360.0 if bearing is not None else None,
             "nvf_posts_ok": nvf_ok,
             "nvf_last_status": nvf_st,
             "nvf_last_endpoint": nvf_ep,
@@ -831,6 +987,7 @@ def api_status():
 @app.route("/api/connect", methods=["POST"])
 def api_connect():
     global serial_thread, simulation_thread, gps_thread, stop_event, reader_error, last_nvf_burst_mono
+    global gps_prev_position, gps_bearing_rad
 
     with state_lock:
         if connected:
@@ -841,6 +998,8 @@ def api_connect():
         stop_event.clear()
         reader_error = None
         last_nvf_burst_mono = 0.0
+        gps_prev_position = None
+        gps_bearing_rad = None
         serial_thread = None
 
         gps_thread = threading.Thread(target=gps_poll_loop, name="gps", daemon=True)
@@ -876,6 +1035,8 @@ def api_connect():
     stop_event.clear()
     reader_error = None
     last_nvf_burst_mono = 0.0
+    gps_prev_position = None
+    gps_bearing_rad = None
     simulation_thread = None
 
     gps_thread = threading.Thread(target=gps_poll_loop, name="gps", daemon=True)
@@ -1015,6 +1176,7 @@ def api_log_delete(name: str):
 
 def main() -> None:
     ensure_log_dir()
+    apply_layback_settings(load_settings())
     port = int(os.environ.get("PORT", "9091"))
     print(f"Marine Magnetics Explorer extension listening on 0.0.0.0:{port}", flush=True)
     serve(app, host="0.0.0.0", port=port, threads=8)

@@ -50,6 +50,16 @@
     .usb-port-cell.usb3.highlighted { background-color: #0a2540; }
     .usb-port-cell .port-type { font-size: 10px; font-weight: 600; color: #5c6b7a; }
     .usb-port-cell.highlighted .port-type { color: #fff; }
+    .field-chart {
+      width: 100%;
+      height: 180px;
+      border: 1px solid #e6ecf2;
+      border-radius: 4px;
+      background: #fafbfc;
+    }
+    .field-chart path { fill: none; stroke: #0a2540; stroke-width: 2; }
+    .field-chart .axis { stroke: #cfd8e3; stroke-width: 1; }
+    .field-chart .chart-label { fill: #5c6b7a; font-size: 11px; }
   </style>
 </head>
 <body>
@@ -217,6 +227,39 @@
                 </v-col>
               </v-row>
 
+              <v-row dense class="mt-2">
+                <v-col cols="12" md="3">
+                  <v-text-field
+                    v-model.number="laybackX"
+                    label="Layback X (m, +starboard)"
+                    type="number"
+                    step="0.1"
+                    outlined dense hide-details
+                    color="primary"
+                    prepend-inner-icon="mdi-axis-x-arrow"
+                    @change="saveSettingsDebounced"
+                  ></v-text-field>
+                </v-col>
+                <v-col cols="12" md="3">
+                  <v-text-field
+                    v-model.number="laybackY"
+                    label="Layback Y (m, -behind)"
+                    type="number"
+                    step="0.1"
+                    outlined dense hide-details
+                    color="primary"
+                    prepend-inner-icon="mdi-axis-y-arrow"
+                    @change="saveSettingsDebounced"
+                  ></v-text-field>
+                </v-col>
+                <v-col cols="12" md="6" class="d-flex align-center">
+                  <span class="text-caption grey--text">
+                    CSV logs predicted layback position using vessel GPS and motion bearing.
+                    Defaults: X 0 m, Y -5 m.
+                  </span>
+                </v-col>
+              </v-row>
+
               <v-row dense class="mt-4">
                 <v-col cols="12" md="6">
                   <v-card outlined>
@@ -243,9 +286,32 @@
                           <tr><td>Larmor (ms)</td><td>{{ lastParsed.larmor_ms }}</td></tr>
                           <tr><td>GPS lat</td><td>{{ gpsLat != null ? gpsLat.toFixed(7) : '—' }}</td></tr>
                           <tr><td>GPS lon</td><td>{{ gpsLon != null ? gpsLon.toFixed(7) : '—' }}</td></tr>
+                          <tr><td>Layback lat</td><td>{{ lastParsed.layback_lat != null ? lastParsed.layback_lat.toFixed(7) : '—' }}</td></tr>
+                          <tr><td>Layback lon</td><td>{{ lastParsed.layback_lon != null ? lastParsed.layback_lon.toFixed(7) : '—' }}</td></tr>
+                          <tr><td>Bearing</td><td>{{ lastParsed.layback_bearing_deg != null ? lastParsed.layback_bearing_deg.toFixed(1) + '°' : '—' }}</td></tr>
                         </tbody>
                       </v-simple-table>
                       <div v-else class="grey--text">Connect and wait for a valid sentence.</div>
+                    </v-card-text>
+                  </v-card>
+                </v-col>
+              </v-row>
+
+              <v-row dense class="mt-4">
+                <v-col cols="12">
+                  <v-card outlined>
+                    <v-card-title class="py-2 subtitle-1 primary--text">
+                      Field trend (last {{ fieldHistory.length }} / 300 samples)
+                    </v-card-title>
+                    <v-card-text>
+                      <svg class="field-chart" viewBox="0 0 600 180" preserveAspectRatio="none">
+                        <line class="axis" x1="28" y1="145" x2="590" y2="145"></line>
+                        <line class="axis" x1="28" y1="15" x2="28" y2="145"></line>
+                        <text class="chart-label" x="35" y="24">{{ chartMaxLabel }}</text>
+                        <text class="chart-label" x="35" y="140">{{ chartMinLabel }}</text>
+                        <path v-if="chartPath" :d="chartPath"></path>
+                        <text v-else class="chart-label" x="250" y="90">Waiting for samples...</text>
+                      </svg>
                     </v-card-text>
                   </v-card>
                 </v-col>
@@ -322,10 +388,13 @@
           logsLoading: false,
           baudChoices: [1200, 2400, 4800, 9600, 19200],
           baudRate: 9600,
+          laybackX: 0.0,
+          laybackY: -5.0,
           ports: [],
           selectedPort: '',
           connected: false,
           liveLines: [],
+          fieldHistory: [],
           lastParsed: null,
           gpsLat: null,
           gpsLon: null,
@@ -362,6 +431,39 @@
         gpsLabel() {
           if (this.gpsLat == null || this.gpsLon == null) return 'no fix';
           return 'fix';
+        },
+        chartStats() {
+          const values = this.fieldHistory.map((p) => p.v).filter((v) => Number.isFinite(v));
+          if (!values.length) return { min: null, max: null };
+          let min = Math.min(...values);
+          let max = Math.max(...values);
+          if (min === max) {
+            min -= 1;
+            max += 1;
+          }
+          return { min, max };
+        },
+        chartPath() {
+          if (this.fieldHistory.length < 2) return '';
+          const { min, max } = this.chartStats;
+          if (min == null || max == null) return '';
+          const left = 28;
+          const right = 590;
+          const top = 15;
+          const bottom = 145;
+          const range = max - min || 1;
+          const points = this.fieldHistory.map((p, i) => {
+            const x = left + (i / Math.max(1, this.fieldHistory.length - 1)) * (right - left);
+            const y = bottom - ((p.v - min) / range) * (bottom - top);
+            return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
+          });
+          return points.join(' ');
+        },
+        chartMinLabel() {
+          return this.chartStats.min == null ? '' : `${this.chartStats.min.toFixed(2)} nT`;
+        },
+        chartMaxLabel() {
+          return this.chartStats.max == null ? '' : `${this.chartStats.max.toFixed(2)} nT`;
         },
       },
       mounted() {
@@ -418,6 +520,8 @@
             const r = await axios.get('/api/settings');
             this.selectedPort = r.data.port || '';
             this.baudRate = r.data.baud_rate || 9600;
+            this.laybackX = Number(r.data.layback_x_m ?? 0);
+            this.laybackY = Number(r.data.layback_y_m ?? -5);
           } catch (e) { /* ignore */ }
         },
         saveSettingsDebounced() {
@@ -426,7 +530,12 @@
         },
         async saveSettings() {
           try {
-            await axios.post('/api/settings', { port: this.selectedPort, baud_rate: this.baudRate });
+            await axios.post('/api/settings', {
+              port: this.selectedPort,
+              baud_rate: this.baudRate,
+              layback_x_m: Number(this.laybackX) || 0,
+              layback_y_m: Number(this.laybackY) || 0,
+            });
           } catch (e) { /* ignore */ }
         },
         async connect() {
@@ -434,6 +543,7 @@
           this.busy = true;
           try {
             await this.saveSettings();
+            this.fieldHistory = [];
             const r = await axios.post('/api/connect', {
               port: this.selectedPort,
               baud_rate: this.baudRate,
@@ -450,6 +560,8 @@
           this.alertMsg = '';
           this.simBusy = true;
           try {
+            await this.saveSettings();
+            this.fieldHistory = [];
             const r = await axios.post('/api/connect', { simulate: true });
             if (!r.data.ok) throw new Error(r.data.error || 'simulation failed');
           } catch (e) {
@@ -491,6 +603,15 @@
           const age = s.gps_age_s;
           this.gpsOk = age != null && age < 5;
         },
+        addFieldSample(data) {
+          if (!data || data.field_nt == null) return;
+          const v = Number(data.field_nt);
+          if (!Number.isFinite(v)) return;
+          this.fieldHistory.push({ t: data.unix_ms || Date.now(), v });
+          if (this.fieldHistory.length > 300) {
+            this.fieldHistory.splice(0, this.fieldHistory.length - 300);
+          }
+        },
         pollStatus() {
           setInterval(() => this.refreshStatus(), 3000);
         },
@@ -503,6 +624,8 @@
                 if (msg.settings) {
                   if (msg.settings.port) this.selectedPort = msg.settings.port;
                   if (msg.settings.baud_rate) this.baudRate = msg.settings.baud_rate;
+                  if (msg.settings.layback_x_m != null) this.laybackX = Number(msg.settings.layback_x_m);
+                  if (msg.settings.layback_y_m != null) this.laybackY = Number(msg.settings.layback_y_m);
                 }
                 if (msg.baud_choices) this.baudChoices = msg.baud_choices;
               } else if (msg.type === 'raw_sentence') {
@@ -510,6 +633,7 @@
                 if (this.liveLines.length > 10) this.liveLines.pop();
               } else if (msg.type === 'parsed') {
                 this.lastParsed = msg.data;
+                this.addFieldSample(msg.data);
               } else if (msg.type === 'gps') {
                 this.gpsLat = msg.lat;
                 this.gpsLon = msg.lon;
