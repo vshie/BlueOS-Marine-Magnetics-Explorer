@@ -57,6 +57,7 @@ DEFAULT_LAYBACK_Y_M = -5.0  # positive = forward, negative = behind / layback
 
 # Max ~4 Hz bursts to autopilot (4 NVF per burst)
 NVF_MIN_INTERVAL_S = 0.25
+EXPLORER_4HZ_COMMAND = b"1"  # Manual: "1 Set 250ms cycle time" (4 Hz)
 
 SENTENCE_RE = re.compile(
     r"^\*(?P<year>\d{2})\.(?P<jday>\d{3})/"
@@ -572,6 +573,12 @@ def open_csv_log() -> Tuple[str, Path]:
     return name, path
 
 
+def configure_explorer_4hz(serial_conn: serial.Serial) -> None:
+    """Put Explorer into 250 ms / 4 Hz cycling mode on each serial connection."""
+    serial_conn.write(EXPLORER_4HZ_COMMAND)
+    serial_conn.flush()
+
+
 def write_csv_row(parsed: Dict[str, Any], raw: str, unix_ms: int, utc_time: str) -> None:
     global csv_writer
     with state_lock:
@@ -776,6 +783,7 @@ def serial_read_loop(port: str, baud: int) -> None:
     reader_error = None
     try:
         ser = serial.Serial(port=port, baudrate=baud, timeout=1.0, bytesize=serial.EIGHTBITS, parity=serial.PARITY_NONE, stopbits=serial.STOPBITS_ONE)
+        configure_explorer_4hz(ser)
     except Exception as e:
         reader_error = str(e)
         stop_event.set()
@@ -809,7 +817,16 @@ def serial_read_loop(port: str, baud: int) -> None:
         csv_writer = log_writer
         connected = True
 
-    sse_broadcast({"type": "status", "connected": True, "log": log_name, "port": port, "baud": baud})
+    sse_broadcast(
+        {
+            "type": "status",
+            "connected": True,
+            "log": log_name,
+            "port": port,
+            "baud": baud,
+            "message": "Explorer 4 Hz cycling command sent.",
+        }
+    )
 
     while not stop_event.is_set() and ser and ser.is_open:
         try:

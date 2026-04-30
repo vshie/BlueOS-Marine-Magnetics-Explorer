@@ -3,6 +3,7 @@
 BlueOS extension for a **Marine Magnetics Explorer** towed magnetometer. It:
 
 - Opens a user-selected **USB serial** port and baud rate (persisted in `state.json` on the logs volume).
+- Sends the Explorer **`1`** command on connect to set **250 ms / 4 Hz** cycling.
 - Shows the **last 10 raw sentences** in the web UI.
 - Polls **GPS** from [Mavlink2Rest](http://host.docker.internal/mavlink2rest/) (`GLOBAL_POSITION_INT`).
 - Appends **CSV** logs under `/app/logs` with a new file per connection: `explorer_YYYYmmdd_HHMMSS.csv`.
