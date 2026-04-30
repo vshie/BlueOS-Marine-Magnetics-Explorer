@@ -67,7 +67,7 @@ SENTENCE_RE = re.compile(
     r"(?:\s+A:(?P<alt>[-+]?\d+\.\d+)m)?"
     r"\s+L(?P<leak>\d)\s+"
     r"(?P<larmor>\d+)ms"
-    r"(?:_Q:(?P<quality>\d+))?\s*!!!"
+    r"\s+Q:(?P<quality>\d+)\s*$"
 )
 
 CSV_COLUMNS = [
@@ -634,7 +634,7 @@ def build_simulated_sentence() -> str:
     depth = 8.0 + 2.0 * math.sin(tmono * 0.47)
     larmor = 100 + int(25 * abs(math.sin(tmono * 0.62)))
     return (
-        f"*{yy}.{jjj}/{tstr} F:{field:.3f} S:{signal:03d} D:{depth:+.1f}m L0 {larmor}ms_Q:99 !!!"
+        f"*{yy}.{jjj}/{tstr} F:{field:.3f} S:{signal:03d} D:{depth:+.1f}m L0 {larmor:04d}ms Q:99"
     )
 
 
