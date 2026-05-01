@@ -222,6 +222,11 @@
                     </v-chip>
                     <v-chip small outlined color="primary">NVF last: {{ nvfLastStatus }}</v-chip>
                     <v-chip v-if="nvfLastEndpoint" small outlined>{{ nvfLastEndpoint }}</v-chip>
+                    <v-chip
+                      v-for="(v, k) in nvfLastSent"
+                      :key="'sent-' + k"
+                      small outlined color="primary"
+                    >{{ k }}: {{ formatNvfValue(v) }}</v-chip>
                     <v-chip v-if="currentLog" small outlined color="primary">Log: {{ currentLog }}</v-chip>
                   </div>
                 </v-col>
@@ -403,6 +408,7 @@
           nvfPostsOk: 0,
           nvfLastStatus: 'idle',
           nvfLastEndpoint: null,
+          nvfLastSent: {},
           currentLog: null,
           alertMsg: '',
           logs: [],
@@ -476,6 +482,13 @@
         if (this.es) this.es.close();
       },
       methods: {
+        formatNvfValue(v) {
+          const n = Number(v);
+          if (!Number.isFinite(n)) return String(v);
+          if (Math.abs(n) >= 1000) return n.toFixed(1);
+          if (Math.abs(n) >= 1) return n.toFixed(2);
+          return n.toFixed(3);
+        },
         async fetchPorts() {
           this.portsLoading = true;
           try {
@@ -590,6 +603,7 @@
           this.nvfPostsOk = s.nvf_posts_ok || 0;
           this.nvfLastStatus = s.nvf_last_status || 'idle';
           this.nvfLastEndpoint = s.nvf_last_endpoint || null;
+          this.nvfLastSent = s.nvf_last_sent || {};
           if (s.last_lines && s.last_lines.length) {
             this.liveLines = s.last_lines.slice().reverse();
           }
@@ -640,7 +654,10 @@
                 this.gpsAlt = msg.alt_m;
                 this.gpsOk = true;
               } else if (msg.type === 'mavlink_ack') {
-                this.refreshStatus();
+                if (msg.sent) this.nvfLastSent = msg.sent;
+                this.nvfLastStatus = msg.ok ? 'ok' : ('failed:' + (msg.name || ''));
+                if (msg.endpoint) this.nvfLastEndpoint = msg.endpoint;
+                if (msg.ok) this.nvfPostsOk += Object.keys(msg.sent || {}).length;
               } else if (msg.type === 'status') {
                 this.connected = !!msg.connected;
                 this.simulation = !!msg.simulate;

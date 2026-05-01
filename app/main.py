@@ -48,8 +48,6 @@ MAVLINK_POST_ENDPOINTS = [
     "http://blueos.local/mavlink2rest/mavlink",
 ]
 
-BOOT_MONO = time.monotonic()
-
 # Explorer default per manufacturer: 9600 8N1
 BAUD_CHOICES = [1200, 2400, 4800, 9600, 19200]
 DEFAULT_LAYBACK_X_M = 0.0  # positive = starboard, negative = port
@@ -250,10 +248,10 @@ gps_bearing_rad: Optional[float] = None
 layback_x_m = DEFAULT_LAYBACK_X_M
 layback_y_m = DEFAULT_LAYBACK_Y_M
 
-mavlink_seq = 0
 nvf_posts_ok = 0
 nvf_last_status = "idle"
 nvf_last_endpoint: Optional[str] = None
+nvf_last_sent: Dict[str, float] = {}
 last_parsed: Optional[Dict[str, Any]] = None
 last_nvf_burst_mono = 0.0
 
@@ -414,26 +412,19 @@ def calculate_layback_position(
     )
 
 
-def mavlink_sequence_next() -> int:
-    global mavlink_seq
-    with state_lock:
-        mavlink_seq = (mavlink_seq + 1) % 256
-        return mavlink_seq
-
-
-def build_nvf_payload(name: str, value: float, seq: int) -> Dict[str, Any]:
+def build_nvf_payload(name: str, value: float) -> Dict[str, Any]:
+    """Match the Odometer extension's working NAMED_VALUE_FLOAT payload exactly."""
     name_array: List[str] = []
     for i in range(10):
         if i < len(name):
             name_array.append(name[i])
         else:
             name_array.append("\u0000")
-    time_boot_ms = int((time.monotonic() - BOOT_MONO) * 1000) & 0xFFFFFFFF
     return {
-        "header": {"system_id": 255, "component_id": 0, "sequence": seq},
+        "header": {"system_id": 255, "component_id": 0, "sequence": 0},
         "message": {
             "type": "NAMED_VALUE_FLOAT",
-            "time_boot_ms": time_boot_ms,
+            "time_boot_ms": 0,
             "value": float(value),
             "name": name_array,
         },
@@ -442,8 +433,7 @@ def build_nvf_payload(name: str, value: float, seq: int) -> Dict[str, Any]:
 
 def send_named_value_float(name: str, value: float) -> Tuple[bool, Optional[str]]:
     """POST NAMED_VALUE_FLOAT to Mavlink2Rest; try endpoints in order."""
-    seq = mavlink_sequence_next()
-    payload = build_nvf_payload(name, value, seq)
+    payload = build_nvf_payload(name, value)
     for post_url in MAVLINK_POST_ENDPOINTS:
         try:
             r = requests.post(post_url, json=payload, timeout=2.0)
@@ -456,37 +446,53 @@ def send_named_value_float(name: str, value: float) -> Tuple[bool, Optional[str]
 
 def send_nvf_burst(field_nt: float, signal: int, depth_m: Optional[float], quality: Optional[int]) -> None:
     """Send four NVFs; update counters and SSE."""
-    global nvf_posts_ok, nvf_last_status, nvf_last_endpoint
+    global nvf_posts_ok, nvf_last_status, nvf_last_endpoint, nvf_last_sent
 
     depth_val = float(depth_m) if depth_m is not None else 0.0
     qual_val = float(quality) if quality is not None else 0.0
 
     specs = [
-        ("MAG_NT", field_nt),
+        ("MAG_NT", float(field_nt)),
         ("MAG_SIG", float(signal)),
         ("MAG_DEPTH", depth_val),
         ("MAG_QUAL", qual_val),
     ]
-    ok_any = False
     last_url: Optional[str] = None
+    sent: Dict[str, float] = {}
     for n, v in specs:
         ok, url = send_named_value_float(n, v)
         if ok:
-            ok_any = True
             last_url = url
+            sent[n] = v
             with state_lock:
                 nvf_posts_ok += 1
         else:
             with state_lock:
                 nvf_last_status = f"failed:{n}"
                 nvf_last_endpoint = None
-            sse_broadcast({"type": "mavlink_ack", "ok": False, "name": n})
+                nvf_last_sent = sent
+            sse_broadcast(
+                {
+                    "type": "mavlink_ack",
+                    "ok": False,
+                    "name": n,
+                    "sent": sent,
+                }
+            )
             return
 
     with state_lock:
         nvf_last_status = "ok"
         nvf_last_endpoint = last_url
-    sse_broadcast({"type": "mavlink_ack", "ok": ok_any, "endpoint": last_url, "names": [s[0] for s in specs]})
+        nvf_last_sent = sent
+    sse_broadcast(
+        {
+            "type": "mavlink_ack",
+            "ok": True,
+            "endpoint": last_url,
+            "sent": sent,
+        }
+    )
 
 
 def detect_vehicle_id() -> int:
@@ -971,6 +977,7 @@ def api_status():
         nvf_ok = nvf_posts_ok
         nvf_st = nvf_last_status
         nvf_ep = nvf_last_endpoint
+        nvf_sent = dict(nvf_last_sent)
         conn = connected
         sim = simulating
         vid = vehicle_id
@@ -997,6 +1004,7 @@ def api_status():
             "nvf_posts_ok": nvf_ok,
             "nvf_last_status": nvf_st,
             "nvf_last_endpoint": nvf_ep,
+            "nvf_last_sent": nvf_sent,
             "reader_error": err,
         }
     )
