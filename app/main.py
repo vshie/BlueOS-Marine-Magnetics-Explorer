@@ -56,6 +56,8 @@ DEFAULT_LAYBACK_Y_M = -5.0  # positive = forward, negative = behind / layback
 # Max ~4 Hz bursts to autopilot (4 NVF per burst)
 NVF_MIN_INTERVAL_S = 0.25
 EXPLORER_4HZ_COMMAND = b"1"  # Manual: "1 Set 250ms cycle time" (4 Hz)
+EXPLORER_AUTOTUNE_ON_COMMAND = b"X"  # Manual: "X Auto-tune on"
+EXPLORER_AUTOTUNE_OFF_COMMAND = b"Y"  # Manual: "Y Auto-tune off"
 
 SENTENCE_RE = re.compile(
     r"^\*(?P<year>\d{2})\.(?P<jday>\d{3})/"
@@ -586,6 +588,27 @@ def configure_explorer_4hz(serial_conn: serial.Serial) -> None:
     serial_conn.flush()
 
 
+def send_explorer_command(cmd: bytes) -> Tuple[bool, str]:
+    """Write a single Explorer ASCII command byte to the live serial port.
+
+    Returns (ok, message). Refuses if the link is not a real serial connection
+    (simulation mode has no port to talk to).
+    """
+    with state_lock:
+        local_ser = ser
+        is_sim = simulating
+    if is_sim:
+        return False, "Simulation mode has no serial port"
+    if not local_ser or not local_ser.is_open:
+        return False, "Serial port is not open"
+    try:
+        local_ser.write(cmd)
+        local_ser.flush()
+        return True, "ok"
+    except Exception as e:
+        return False, f"Serial write failed: {e}"
+
+
 def write_csv_row(parsed: Dict[str, Any], raw: str, unix_ms: int, utc_time: str) -> None:
     global csv_writer
     with state_lock:
@@ -1109,6 +1132,36 @@ def api_disconnect():
     gps_thread = None
     stop_event = threading.Event()
     return jsonify({"ok": True})
+
+
+EXPLORER_COMMANDS: Dict[str, bytes] = {
+    "autotune_on": EXPLORER_AUTOTUNE_ON_COMMAND,
+    "autotune_off": EXPLORER_AUTOTUNE_OFF_COMMAND,
+    "cycle_4hz": EXPLORER_4HZ_COMMAND,
+}
+
+
+@app.route("/api/explorer/command", methods=["POST"])
+def api_explorer_command():
+    body = request.get_json(silent=True) or {}
+    name = str(body.get("command", "")).strip()
+    cmd = EXPLORER_COMMANDS.get(name)
+    if not cmd:
+        return (
+            jsonify({"ok": False, "error": f"unknown command: {name}"}),
+            400,
+        )
+    ok, msg = send_explorer_command(cmd)
+    sse_broadcast(
+        {
+            "type": "explorer_command",
+            "ok": ok,
+            "command": name,
+            "byte": cmd.decode("ascii"),
+            "message": msg,
+        }
+    )
+    return jsonify({"ok": ok, "command": name, "byte": cmd.decode("ascii"), "message": msg}), (200 if ok else 409)
 
 
 @app.route("/api/events")

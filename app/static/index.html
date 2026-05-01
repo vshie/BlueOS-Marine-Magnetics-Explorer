@@ -139,6 +139,33 @@
                 </v-col>
               </v-row>
 
+              <v-row dense class="mt-1">
+                <v-col cols="12" class="d-flex flex-wrap align-center" style="gap: 8px;">
+                  <span class="text-caption grey--text text--darken-2">Auto-tune (manual: X = on, Y = off):</span>
+                  <v-btn
+                    small color="primary" depressed
+                    :loading="autotuneBusy === 'on'"
+                    :disabled="!connected || simulation || autotuneBusy !== ''"
+                    @click="sendExplorerCommand('autotune_on')"
+                    title="Send X to enable auto-tune"
+                  >
+                    <v-icon left small>mdi-tune-vertical</v-icon>Auto-tune ON (X)
+                  </v-btn>
+                  <v-btn
+                    small color="primary" outlined
+                    :loading="autotuneBusy === 'off'"
+                    :disabled="!connected || simulation || autotuneBusy !== ''"
+                    @click="sendExplorerCommand('autotune_off')"
+                    title="Send Y to disable auto-tune"
+                  >
+                    <v-icon left small>mdi-tune-vertical-variant</v-icon>Auto-tune OFF (Y)
+                  </v-btn>
+                  <v-chip v-if="lastExplorerCommand" small outlined :color="lastExplorerCommandOk ? 'success' : 'error'">
+                    Last: {{ lastExplorerCommand }} — {{ lastExplorerCommandMsg }}
+                  </v-chip>
+                </v-col>
+              </v-row>
+
               <v-expansion-panels flat class="mt-3 device-id-panel" v-model="devicePanel">
                 <v-expansion-panel>
                   <v-expansion-panel-header class="py-2 px-3">
@@ -389,6 +416,10 @@
           busy: false,
           simBusy: false,
           simulation: false,
+          autotuneBusy: '',
+          lastExplorerCommand: '',
+          lastExplorerCommandMsg: '',
+          lastExplorerCommandOk: true,
           portsLoading: false,
           logsLoading: false,
           baudChoices: [1200, 2400, 4800, 9600, 19200],
@@ -550,6 +581,28 @@
               layback_y_m: Number(this.laybackY) || 0,
             });
           } catch (e) { /* ignore */ }
+        },
+        async sendExplorerCommand(name) {
+          if (this.autotuneBusy) return;
+          const isAutotune = name === 'autotune_on' || name === 'autotune_off';
+          if (isAutotune) this.autotuneBusy = name === 'autotune_on' ? 'on' : 'off';
+          try {
+            const r = await axios.post('/api/explorer/command', { command: name });
+            const d = r.data || {};
+            this.lastExplorerCommandOk = !!d.ok;
+            this.lastExplorerCommand = (d.byte ? d.byte + ' ' : '') + name;
+            this.lastExplorerCommandMsg = d.message || (d.ok ? 'sent' : 'failed');
+          } catch (e) {
+            this.lastExplorerCommandOk = false;
+            this.lastExplorerCommand = name;
+            this.lastExplorerCommandMsg =
+              (e.response && e.response.data && e.response.data.message) ||
+              (e.response && e.response.data && e.response.data.error) ||
+              e.message ||
+              'Command failed';
+          } finally {
+            if (isAutotune) this.autotuneBusy = '';
+          }
         },
         async connect() {
           this.alertMsg = '';
