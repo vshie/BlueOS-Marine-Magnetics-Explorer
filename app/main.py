@@ -83,13 +83,13 @@ CSV_COLUMNS = [
     "leak",
     "larmor_ms",
     "quality",
-    "lat",
-    "lon",
-    "gps_alt_m",
-    "gps_age_ms",
-    "layback_lat",
-    "layback_lon",
-    "layback_bearing_deg",
+    "vessel_lat",
+    "vessel_lon",
+    "vessel_alt_m",
+    "vessel_gps_age_ms",
+    "vessel_bearing_deg",
+    "towfish_lat",
+    "towfish_lon",
     "layback_x_m",
     "layback_y_m",
     "raw_sentence",
@@ -599,7 +599,7 @@ def write_csv_row(parsed: Dict[str, Any], raw: str, unix_ms: int, utc_time: str)
     age_ms = ""
     if last_ok is not None:
         age_ms = int((time.monotonic() - last_ok) * 1000)
-    layback_lat, layback_lon = calculate_layback_position(lat, lon, lb_x, lb_y, bearing)
+    towfish_lat, towfish_lon = calculate_layback_position(lat, lon, lb_x, lb_y, bearing)
     bearing_deg = ""
     if bearing is not None:
         bearing_deg = (math.degrees(bearing) + 360.0) % 360.0
@@ -620,9 +620,9 @@ def write_csv_row(parsed: Dict[str, Any], raw: str, unix_ms: int, utc_time: str)
         lon if lon is not None else "",
         alt_m if alt_m is not None else "",
         age_ms,
-        layback_lat if layback_lat is not None else "",
-        layback_lon if layback_lon is not None else "",
         bearing_deg,
+        towfish_lat if towfish_lat is not None else "",
+        towfish_lon if towfish_lon is not None else "",
         lb_x,
         lb_y,
         raw,
@@ -673,10 +673,11 @@ def process_incoming_sentence(raw: str) -> None:
     with state_lock:
         lat = gps_fix["lat"]
         lon = gps_fix["lon"]
+        alt_m = gps_fix["alt_m"]
         bearing = gps_bearing_rad
         lb_x = layback_x_m
         lb_y = layback_y_m
-    layback_lat, layback_lon = calculate_layback_position(lat, lon, lb_x, lb_y, bearing)
+    towfish_lat, towfish_lon = calculate_layback_position(lat, lon, lb_x, lb_y, bearing)
     bearing_deg = None
     if bearing is not None:
         bearing_deg = (math.degrees(bearing) + 360.0) % 360.0
@@ -686,9 +687,12 @@ def process_incoming_sentence(raw: str) -> None:
         "raw": raw,
         "unix_ms": unix_ms,
         "utc_time": utc_time,
-        "layback_lat": layback_lat,
-        "layback_lon": layback_lon,
-        "layback_bearing_deg": bearing_deg,
+        "vessel_lat": lat,
+        "vessel_lon": lon,
+        "vessel_alt_m": alt_m,
+        "vessel_bearing_deg": bearing_deg,
+        "towfish_lat": towfish_lat,
+        "towfish_lon": towfish_lon,
         "layback_x_m": lb_x,
         "layback_y_m": lb_y,
     }

@@ -7,7 +7,7 @@ BlueOS extension for a **Marine Magnetics Explorer** towed magnetometer. It:
 - Shows the **last 10 raw sentences** in the web UI.
 - Polls **GPS** from [Mavlink2Rest](http://host.docker.internal/mavlink2rest/) (`GLOBAL_POSITION_INT`).
 - Appends **CSV** logs under `/app/logs` with a new file per connection: `explorer_YYYYmmdd_HHMMSS.csv`.
-- Logs an estimated **layback position** (`layback_lat`, `layback_lon`) from vessel GPS, motion bearing, and configurable X/Y offsets.
+- Logs both the **vessel position** from Mavlink2Rest (`vessel_lat`, `vessel_lon`, `vessel_alt_m`) and the **estimated towfish position** (`towfish_lat`, `towfish_lon`) from layback offsets and motion bearing.
 - Sends **NAMED_VALUE_FLOAT** messages (total field, signal, depth, quality) to the autopilot log via Mavlink2Rest.
 
 The UI (Vue 2 + Vuetify) and fonts/scripts are **vendored in the Docker image** at build time so the vehicle does not need internet at runtime.
@@ -25,7 +25,7 @@ The UI includes **Layback X** and **Layback Y** settings (meters), persisted in 
 - `layback_x_m`: positive is starboard, negative is port.
 - `layback_y_m`: positive is forward, negative is behind the vehicle.
 
-The extension estimates motion bearing from consecutive GPS fixes, rotates the X/Y offsets into local east/north meters, and writes `layback_lat`, `layback_lon`, `layback_bearing_deg`, `layback_x_m`, and `layback_y_m` into each CSV row. If bearing is not available yet, layback lat/lon fall back to the current vessel GPS position.
+The extension estimates motion bearing from consecutive GPS fixes, rotates the X/Y offsets into local east/north meters, and writes `vessel_bearing_deg`, `towfish_lat`, `towfish_lon`, `layback_x_m`, and `layback_y_m` into each CSV row alongside the vessel position. If bearing is not available yet, the towfish lat/lon fall back to the current vessel GPS position.
 
 ## BlueOS install
 

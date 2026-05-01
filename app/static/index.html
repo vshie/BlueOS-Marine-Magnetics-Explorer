@@ -289,11 +289,11 @@
                           <tr><td>Quality</td><td>{{ lastParsed.quality != null ? lastParsed.quality : '—' }}</td></tr>
                           <tr><td>Leak</td><td>{{ lastParsed.leak }}</td></tr>
                           <tr><td>Larmor (ms)</td><td>{{ lastParsed.larmor_ms }}</td></tr>
-                          <tr><td>GPS lat</td><td>{{ gpsLat != null ? gpsLat.toFixed(7) : '—' }}</td></tr>
-                          <tr><td>GPS lon</td><td>{{ gpsLon != null ? gpsLon.toFixed(7) : '—' }}</td></tr>
-                          <tr><td>Layback lat</td><td>{{ lastParsed.layback_lat != null ? lastParsed.layback_lat.toFixed(7) : '—' }}</td></tr>
-                          <tr><td>Layback lon</td><td>{{ lastParsed.layback_lon != null ? lastParsed.layback_lon.toFixed(7) : '—' }}</td></tr>
-                          <tr><td>Bearing</td><td>{{ lastParsed.layback_bearing_deg != null ? lastParsed.layback_bearing_deg.toFixed(1) + '°' : '—' }}</td></tr>
+                          <tr><td>Vessel lat</td><td>{{ gpsLat != null ? gpsLat.toFixed(7) : '—' }}</td></tr>
+                          <tr><td>Vessel lon</td><td>{{ gpsLon != null ? gpsLon.toFixed(7) : '—' }}</td></tr>
+                          <tr><td>Vessel bearing</td><td>{{ lastParsed.vessel_bearing_deg != null ? lastParsed.vessel_bearing_deg.toFixed(1) + '°' : '—' }}</td></tr>
+                          <tr><td>Towfish lat</td><td>{{ lastParsed.towfish_lat != null ? lastParsed.towfish_lat.toFixed(7) : '—' }}</td></tr>
+                          <tr><td>Towfish lon</td><td>{{ lastParsed.towfish_lon != null ? lastParsed.towfish_lon.toFixed(7) : '—' }}</td></tr>
                         </tbody>
                       </v-simple-table>
                       <div v-else class="grey--text">Connect and wait for a valid sentence.</div>
