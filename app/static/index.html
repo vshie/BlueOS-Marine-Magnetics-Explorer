@@ -332,8 +332,16 @@
               <v-row dense class="mt-4">
                 <v-col cols="12">
                   <v-card outlined>
-                    <v-card-title class="py-2 subtitle-1 primary--text">
-                      Field trend (last {{ fieldHistory.length }} / 300 samples)
+                    <v-card-title class="py-2 subtitle-1 primary--text d-flex align-center">
+                      <span>Field trend (last {{ fieldHistory.length }} / 300 samples)</span>
+                      <v-spacer></v-spacer>
+                      <v-btn
+                        x-small text color="primary"
+                        title="Open standalone widget for Cockpit iframe embedding"
+                        @click="openWidget"
+                      >
+                        <v-icon left small>mdi-open-in-new</v-icon>Embed widget
+                      </v-btn>
                     </v-card-title>
                     <v-card-text>
                       <svg class="field-chart" viewBox="0 0 600 180" preserveAspectRatio="none">
@@ -581,6 +589,9 @@
               layback_y_m: Number(this.laybackY) || 0,
             });
           } catch (e) { /* ignore */ }
+        },
+        openWidget() {
+          window.open('/widget', '_blank', 'noopener');
         },
         async sendExplorerCommand(name) {
           if (this.autotuneBusy) return;

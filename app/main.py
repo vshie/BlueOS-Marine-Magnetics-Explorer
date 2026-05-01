@@ -952,6 +952,14 @@ def index_page():
     return send_from_directory(app.static_folder, "index.html")
 
 
+@app.route("/widget")
+@app.route("/widget/")
+@app.route("/widget/field")
+def widget_field():
+    """Standalone, framework-free line-chart widget for embedding in Cockpit iframes."""
+    return send_from_directory(app.static_folder, "widget.html")
+
+
 @app.route("/api/serial/ports")
 def api_serial_ports():
     return jsonify({"ports": list_serial_ports()})

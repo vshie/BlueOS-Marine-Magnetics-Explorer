@@ -18,6 +18,16 @@ Pushes to `main` run the **Deploy BlueOS Extension** workflow and publish the Do
 
 Use the **Simulation** button in the UI (or `POST /api/connect` with JSON `{"simulate": true}`). The extension opens a CSV log named `explorer_YYYYmmdd_HHMMSS_sim.csv`, emits Explorer-format lines at ~4 Hz, parses them, posts **NAMED_VALUE_FLOAT** to Mavlink2Rest the same way as a real serial link, and still polls GPS from the vehicle if Mavlink2Rest is reachable. **Disconnect** stops simulation and closes the log.
 
+## Cockpit widget (line graph)
+
+A standalone, framework-free line-chart page for embedding the live magnetic field trend in a Cockpit iframe is served at:
+
+- `/widget` — light theme (default)
+- `/widget?theme=dark` — dark theme
+- `/widget?samples=600` — override rolling window size (10–5000)
+
+The widget consumes `/api/events` (SSE) and `/api/status`, has no Vue/Vuetify dependency, and fills its iframe. Use it as the iframe URL of a Cockpit custom widget, e.g. `http://blueos.local/extensionv2/blueos-marine-magnetics-explorer/widget`.
+
 ## Layback position
 
 The UI includes **Layback X** and **Layback Y** settings (meters), persisted in `state.json`.
