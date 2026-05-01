@@ -68,7 +68,8 @@ SENTENCE_RE = re.compile(
     r"(?:\s+A:(?P<alt>[-+]?\d+\.\d+)m)?"
     r"\s+L(?P<leak>\d)\s+"
     r"(?P<larmor>\d+)ms"
-    r"\s+Q:(?P<quality>\d+)\s*$"
+    r"\s+Q:(?P<quality>\d+)"
+    r"(?:\s+\S+)*\s*$"
 )
 
 CSV_COLUMNS = [
