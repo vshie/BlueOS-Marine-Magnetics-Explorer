@@ -146,7 +146,7 @@
       function applyStatus(s) {
         if (!s) return;
         if (s.connected) {
-          setLink(true, s.simulation ? 'simulation' : 'serial connected');
+          setLink(true, 'serial connected');
           modeEl.textContent = s.current_log ? 'log: ' + s.current_log : '';
         } else {
           setLink(false, 'idle');

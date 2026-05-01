@@ -14,10 +14,6 @@ The UI (Vue 2 + Vuetify) and fonts/scripts are **vendored in the Docker image** 
 
 Pushes to `main` run the **Deploy BlueOS Extension** workflow and publish the Docker image when secrets are configured.
 
-## Simulation mode (no hardware)
-
-Use the **Simulation** button in the UI (or `POST /api/connect` with JSON `{"simulate": true}`). The extension opens a CSV log named `explorer_YYYYmmdd_HHMMSS_sim.csv`, emits Explorer-format lines at ~4 Hz, parses them, posts **NAMED_VALUE_FLOAT** to Mavlink2Rest the same way as a real serial link, and still polls GPS from the vehicle if Mavlink2Rest is reachable. **Disconnect** stops simulation and closes the log.
-
 ## Cockpit widget (line graph)
 
 A standalone, framework-free line-chart page for embedding the live magnetic field trend in a Cockpit iframe is served at:

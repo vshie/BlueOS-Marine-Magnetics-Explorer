@@ -33,7 +33,6 @@ LOG_DIR = Path(os.environ.get("LOG_DIR", "/app/logs"))
 STATE_FILENAME = "state.json"
 LOG_PREFIX = "explorer_"
 LOG_SUFFIX = ".csv"
-SIM_LOG_INFIX = "_sim"
 
 MAVLINK_BASE = os.environ.get(
     "MAVLINK2REST_BASE", "http://host.docker.internal/mavlink2rest/mavlink"
@@ -224,10 +223,8 @@ state_lock = threading.Lock()
 sse_clients: List[queue.Queue] = []
 
 connected = False
-simulating = False
 stop_event = threading.Event()
 serial_thread: Optional[threading.Thread] = None
-simulation_thread: Optional[threading.Thread] = None
 gps_thread: Optional[threading.Thread] = None
 
 ser: Optional[serial.Serial] = None
@@ -589,16 +586,9 @@ def configure_explorer_4hz(serial_conn: serial.Serial) -> None:
 
 
 def send_explorer_command(cmd: bytes) -> Tuple[bool, str]:
-    """Write a single Explorer ASCII command byte to the live serial port.
-
-    Returns (ok, message). Refuses if the link is not a real serial connection
-    (simulation mode has no port to talk to).
-    """
+    """Write a single Explorer ASCII command byte to the live serial port."""
     with state_lock:
         local_ser = ser
-        is_sim = simulating
-    if is_sim:
-        return False, "Simulation mode has no serial port"
     if not local_ser or not local_ser.is_open:
         return False, "Serial port is not open"
     try:
@@ -656,23 +646,6 @@ def write_csv_row(parsed: Dict[str, Any], raw: str, unix_ms: int, utc_time: str)
         csv_writer.writerow(row)
         if csv_file:
             csv_file.flush()
-
-
-def build_simulated_sentence() -> str:
-    """One Explorer-style line that matches SENTENCE_RE (for bench testing without hardware)."""
-    now = datetime.now(timezone.utc)
-    yy = now.strftime("%y")
-    jjj = f"{now.timetuple().tm_yday:03d}"
-    frac = (now.microsecond // 100_000) % 10
-    tstr = now.strftime("%H:%M:%S") + f".{frac}"
-    tmono = time.monotonic()
-    field = 50_000.0 + 150.0 * math.sin(tmono * 0.8)
-    signal = max(1, min(999, 85 + int(14 * (0.5 + 0.5 * math.sin(tmono * 0.31)))))
-    depth = 8.0 + 2.0 * math.sin(tmono * 0.47)
-    larmor = 100 + int(25 * abs(math.sin(tmono * 0.62)))
-    return (
-        f"*{yy}.{jjj}/{tstr} F:{field:.3f} S:{signal:03d} D:{depth:+.1f}m L0 {larmor:04d}ms Q:99"
-    )
 
 
 def process_incoming_sentence(raw: str) -> None:
@@ -734,81 +707,6 @@ def process_incoming_sentence(raw: str) -> None:
             parsed["depth_m"],
             parsed["quality"],
         )
-
-
-def open_csv_log_sim() -> Tuple[str, Path]:
-    ensure_log_dir()
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    name = f"{LOG_PREFIX}{ts}{SIM_LOG_INFIX}{LOG_SUFFIX}"
-    return name, LOG_DIR / name
-
-
-def simulation_loop() -> None:
-    """Emit synthetic sentences at ~4 Hz until stop_event (same pipeline as serial)."""
-    global connected, simulating, reader_error, csv_file, csv_writer, current_log_name, last_nvf_burst_mono
-
-    reader_error = None
-    log_name, log_path = open_csv_log_sim()
-    try:
-        log_fp = open(log_path, "a", newline="", encoding="utf-8")
-        log_writer = csv.writer(log_fp)
-        log_writer.writerow(CSV_COLUMNS)
-        log_fp.flush()
-    except Exception as e:
-        reader_error = f"Cannot create simulation log file: {e}"
-        stop_event.set()
-        with state_lock:
-            connected = False
-            simulating = False
-        sse_broadcast({"type": "status", "connected": False, "simulate": False, "error": reader_error})
-        return
-
-    with state_lock:
-        current_log_name = log_name
-        csv_file = log_fp
-        csv_writer = log_writer
-        connected = True
-        simulating = True
-        last_nvf_burst_mono = 0.0
-
-    sse_broadcast(
-        {
-            "type": "status",
-            "connected": True,
-            "simulate": True,
-            "log": log_name,
-            "port": "SIMULATION",
-            "message": "Synthetic Explorer sentences (no USB hardware).",
-        }
-    )
-
-    while not stop_event.is_set():
-        try:
-            process_incoming_sentence(build_simulated_sentence())
-        except Exception as e:
-            reader_error = str(e)
-            sse_broadcast(
-                {
-                    "type": "status",
-                    "connected": True,
-                    "simulate": True,
-                    "serial_error": reader_error,
-                }
-            )
-        stop_event.wait(0.25)
-
-    try:
-        if csv_file:
-            csv_file.close()
-    except Exception:
-        pass
-    with state_lock:
-        csv_file = None
-        csv_writer = None
-        current_log_name = None
-        connected = False
-        simulating = False
-    sse_broadcast({"type": "status", "connected": False, "simulate": False})
 
 
 def serial_read_loop(port: str, baud: int) -> None:
@@ -1014,7 +912,6 @@ def api_status():
         nvf_ep = nvf_last_endpoint
         nvf_sent = dict(nvf_last_sent)
         conn = connected
-        sim = simulating
         vid = vehicle_id
         err = reader_error
         bearing = gps_bearing_rad
@@ -1026,7 +923,6 @@ def api_status():
     return jsonify(
         {
             "connected": conn,
-            "simulation": sim,
             "vehicle_id": vid,
             "current_log": cur,
             "last_lines": lines,
@@ -1047,7 +943,7 @@ def api_status():
 
 @app.route("/api/connect", methods=["POST"])
 def api_connect():
-    global serial_thread, simulation_thread, gps_thread, stop_event, reader_error, last_nvf_burst_mono
+    global serial_thread, gps_thread, stop_event, reader_error, last_nvf_burst_mono
     global gps_prev_position, gps_bearing_rad
 
     with state_lock:
@@ -1055,35 +951,6 @@ def api_connect():
             return jsonify({"ok": False, "error": "already connected"}), 400
 
     data = request.get_json(force=True, silent=True) or {}
-    if bool(data.get("simulate")):
-        stop_event.clear()
-        reader_error = None
-        last_nvf_burst_mono = 0.0
-        gps_prev_position = None
-        gps_bearing_rad = None
-        serial_thread = None
-
-        gps_thread = threading.Thread(target=gps_poll_loop, name="gps", daemon=True)
-        gps_thread.start()
-        simulation_thread = threading.Thread(target=simulation_loop, name="simulation", daemon=True)
-        simulation_thread.start()
-
-        time.sleep(0.2)
-        with state_lock:
-            err = reader_error
-            ok = connected
-        if err and not ok:
-            stop_event.set()
-            if gps_thread:
-                gps_thread.join(timeout=2.0)
-            if simulation_thread:
-                simulation_thread.join(timeout=5.0)
-            simulation_thread = None
-            gps_thread = None
-            return jsonify({"ok": False, "error": err}), 400
-
-        return jsonify({"ok": True, "simulate": True})
-
     port = str(data.get("port", "")).strip()
     baud = int(data.get("baud_rate", load_settings()["baud_rate"]))
     if baud not in BAUD_CHOICES:
@@ -1098,7 +965,6 @@ def api_connect():
     last_nvf_burst_mono = 0.0
     gps_prev_position = None
     gps_bearing_rad = None
-    simulation_thread = None
 
     gps_thread = threading.Thread(target=gps_poll_loop, name="gps", daemon=True)
     gps_thread.start()
@@ -1123,20 +989,16 @@ def api_connect():
 
 @app.route("/api/disconnect", methods=["POST"])
 def api_disconnect():
-    global stop_event, serial_thread, simulation_thread, gps_thread
+    global stop_event, serial_thread, gps_thread
 
     stop_event.set()
     t_ser = serial_thread
-    t_sim = simulation_thread
     t_gps = gps_thread
     if t_ser:
         t_ser.join(timeout=5.0)
-    if t_sim:
-        t_sim.join(timeout=5.0)
     if t_gps:
         t_gps.join(timeout=2.0)
     serial_thread = None
-    simulation_thread = None
     gps_thread = None
     stop_event = threading.Event()
     return jsonify({"ok": True})
