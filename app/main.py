@@ -50,7 +50,7 @@ MAVLINK_POST_ENDPOINTS = [
 # Explorer default per manufacturer: 9600 8N1
 BAUD_CHOICES = [1200, 2400, 4800, 9600, 19200]
 DEFAULT_LAYBACK_X_M = 0.0  # positive = starboard, negative = port
-DEFAULT_LAYBACK_Y_M = -5.0  # positive = forward, negative = behind / layback
+DEFAULT_LAYBACK_Y_M = -10.0  # positive = forward, negative = behind / layback
 
 # Max ~4 Hz bursts to autopilot (6 NVF per burst with deviation + alarm)
 NVF_MIN_INTERVAL_S = 0.25
@@ -1410,7 +1410,7 @@ def register_service():
             "description": "USB serial Explorer data with GPS; CSV logs and NAMED_VALUE_FLOAT to autopilot.",
             "icon": "mdi-magnet",
             "company": "Blue Robotics",
-            "version": "1.0.0",
+            "version": "1.0.1",
             "webpage": "https://github.com/vshie/BlueOS-Marine-Magnetics-Explorer",
             "api": "https://github.com/vshie/BlueOS-Marine-Magnetics-Explorer",
         }

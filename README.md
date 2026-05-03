@@ -110,7 +110,7 @@ The first workflow run may fail until Docker Hub credentials are configured.
 | `port` | `""` | Serial device path (e.g. `/dev/ttyUSB0`) |
 | `baud_rate` | `9600` | One of 1200, 2400, 4800, 9600, 19200 |
 | `layback_x_m` | `0.0` | Lateral offset, +starboard / -port |
-| `layback_y_m` | `-5.0` | Longitudinal offset, +forward / -behind |
+| `layback_y_m` | `-10.0` | Longitudinal offset, +forward / -behind |
 | `sample_rate` | `"1"` | Explorer cycle command: `0` off, `1` 4 Hz, `2` 2 Hz, `3` 1 Hz |
 | `avg_window_s` | `15` | Moving-average window in seconds (one of 4 / 10 / 15 / 30 / 60 / 120) |
 | `alarm_threshold_nt` | `4.0` | Absolute deviation (nT) above which the alarm fires |
