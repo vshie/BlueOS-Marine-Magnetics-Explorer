@@ -7,3 +7,5 @@ venv/
 .DS_Store
 *.log
 app/static/vendor/
+*.tar
+

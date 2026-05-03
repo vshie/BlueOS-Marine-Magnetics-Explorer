@@ -11,6 +11,7 @@
       --mme-muted: #5c6b7a;
       --mme-axis: #cfd8e3;
       --mme-line: #0a2540;
+      --mme-dev: #f57c00;
       --mme-accent: #1976d2;
       --mme-card: #fafbfc;
       --mme-border: #e6ecf2;
@@ -24,14 +25,28 @@
     .value { font-size: 18px; font-weight: 700; color: var(--mme-fg); margin-left: auto; }
     .value .unit { font-size: 11px; font-weight: 500; color: var(--mme-muted); margin-left: 4px; }
     .chart-wrap { flex: 1 1 auto; min-height: 0; border: 1px solid var(--mme-border);
-      border-radius: 4px; background: var(--mme-card); }
+      border-radius: 4px; background: var(--mme-card); transition: border-color 0.2s; }
     svg.chart { width: 100%; height: 100%; display: block; }
     svg.chart .axis { stroke: var(--mme-axis); stroke-width: 1; }
-    svg.chart path { fill: none; stroke: var(--mme-line); stroke-width: 2; }
+    svg.chart path.field-line { fill: none; stroke: var(--mme-line); stroke-width: 2; }
+    svg.chart path.dev-line { fill: none; stroke: var(--mme-dev); stroke-width: 1.5; }
+    svg.chart .zero-line { stroke: var(--mme-dev); stroke-width: 0.6; stroke-dasharray: 4,4; opacity: 0.5; }
     svg.chart text { fill: var(--mme-muted); font-size: 11px; }
-    .footer { display: flex; gap: 12px; font-size: 11px; color: var(--mme-muted); }
+    svg.chart text.dev-label { fill: var(--mme-dev); }
+    .footer { display: flex; gap: 12px; font-size: 11px; color: var(--mme-muted); flex-wrap: wrap; }
     .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #b71c1c; margin-right: 4px; vertical-align: middle; }
     .dot.ok { background: #2e7d32; }
+    .legend { display: flex; gap: 10px; font-size: 11px; color: var(--mme-muted); }
+    .legend .swatch { display: inline-block; width: 12px; height: 3px; vertical-align: middle; margin-right: 4px; border-radius: 2px; }
+    .legend .swatch.field { background: var(--mme-line); }
+    .legend .swatch.dev { background: var(--mme-dev); }
+    .alarm-pill { display: none; padding: 2px 8px; border-radius: 999px; background: #c62828; color: white; font-weight: 600; font-size: 11px; align-self: center; }
+    body.alarm .alarm-pill { display: inline-block; }
+    body.alarm .chart-wrap { border: 2px solid #c62828; animation: alarmPulse 1s infinite; }
+    @keyframes alarmPulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(198, 40, 40, 0.6); }
+      50%      { box-shadow: 0 0 0 6px rgba(198, 40, 40, 0.0); }
+    }
     /* dark variant for darker Cockpit themes — opt in via ?theme=dark */
     body.dark {
       --mme-bg: #0b1620;
@@ -39,6 +54,7 @@
       --mme-muted: #9fb1c1;
       --mme-axis: #2c3e50;
       --mme-line: #4fc3f7;
+      --mme-dev: #ffb74d;
       --mme-accent: #4fc3f7;
       --mme-card: #11202d;
       --mme-border: #1e3142;
@@ -50,21 +66,31 @@
     <div class="header">
       <span class="title">Magnetic field</span>
       <span class="meta" id="sample-count">0 / 300 samples</span>
+      <span class="alarm-pill" id="alarm-pill">ALARM</span>
       <span class="value"><span id="latest-value">—</span><span class="unit">nT</span></span>
+    </div>
+    <div class="legend">
+      <span><span class="swatch field"></span>Field</span>
+      <span><span class="swatch dev"></span>Deviation (<span id="legend-window">15</span>s avg)</span>
     </div>
     <div class="chart-wrap">
       <svg class="chart" viewBox="0 0 600 180" preserveAspectRatio="none">
-        <line class="axis" x1="40" y1="160" x2="592" y2="160"></line>
+        <line class="axis" x1="40" y1="160" x2="560" y2="160"></line>
         <line class="axis" x1="40" y1="12" x2="40" y2="160"></line>
         <text id="max-label" x="48" y="22"></text>
         <text id="min-label" x="48" y="156"></text>
-        <path id="trend"></path>
+        <text id="dev-max-label" class="dev-label" x="564" y="22"></text>
+        <text id="dev-min-label" class="dev-label" x="564" y="156"></text>
+        <line id="zero-line" class="zero-line" x1="40" x2="560" y1="86" y2="86" style="display:none;"></line>
+        <path id="trend" class="field-line"></path>
+        <path id="dev-trend" class="dev-line"></path>
         <text id="placeholder" x="220" y="92">Waiting for samples...</text>
       </svg>
     </div>
     <div class="footer">
       <span><span class="dot" id="link-dot"></span><span id="link-status">connecting...</span></span>
       <span id="connection-mode"></span>
+      <span id="threshold-info"></span>
     </div>
   </div>
 
@@ -72,7 +98,10 @@
     (function () {
       var MAX_SAMPLES = 300;
       var history = [];
+      var devHistory = [];
       var latestValue = null;
+      var avgWindow = 15;
+      var alarmThreshold = 4.0;
 
       var qs = new URLSearchParams(window.location.search);
       if ((qs.get('theme') || '').toLowerCase() === 'dark') {
@@ -84,14 +113,20 @@
       }
 
       var trendEl = document.getElementById('trend');
+      var devTrendEl = document.getElementById('dev-trend');
+      var zeroLineEl = document.getElementById('zero-line');
       var placeholderEl = document.getElementById('placeholder');
       var minLabelEl = document.getElementById('min-label');
       var maxLabelEl = document.getElementById('max-label');
+      var devMinLabelEl = document.getElementById('dev-min-label');
+      var devMaxLabelEl = document.getElementById('dev-max-label');
       var sampleCountEl = document.getElementById('sample-count');
       var latestEl = document.getElementById('latest-value');
       var linkDotEl = document.getElementById('link-dot');
       var linkStatusEl = document.getElementById('link-status');
       var modeEl = document.getElementById('connection-mode');
+      var legendWindowEl = document.getElementById('legend-window');
+      var thresholdInfoEl = document.getElementById('threshold-info');
 
       function fmtNt(v) {
         if (v == null || !Number.isFinite(v)) return '—';
@@ -99,14 +134,39 @@
         return v.toFixed(2);
       }
 
+      function fmtDev(v) {
+        if (v == null || !Number.isFinite(v)) return '—';
+        return (v >= 0 ? '+' : '') + v.toFixed(2);
+      }
+
+      function pathFromHistory(hist, min, max, top, bottom, left, right) {
+        if (!hist || hist.length < 2) return '';
+        var range = (max - min) || 1;
+        var n = hist.length;
+        var d = '';
+        for (var i = 0; i < n; i++) {
+          var x = left + (i / Math.max(1, n - 1)) * (right - left);
+          var y = bottom - ((hist[i].v - min) / range) * (bottom - top);
+          d += (i === 0 ? 'M' : 'L') + x.toFixed(1) + ',' + y.toFixed(1) + ' ';
+        }
+        return d.trim();
+      }
+
       function render() {
         sampleCountEl.textContent = history.length + ' / ' + MAX_SAMPLES + ' samples';
         latestEl.textContent = fmtNt(latestValue);
+        legendWindowEl.textContent = String(avgWindow);
+        thresholdInfoEl.textContent = 'thr: ' + fmtNt(alarmThreshold) + ' nT';
+        var left = 40, right = 560, top = 12, bottom = 160;
         if (history.length < 2) {
           trendEl.setAttribute('d', '');
+          devTrendEl.setAttribute('d', '');
           placeholderEl.style.display = '';
           minLabelEl.textContent = '';
           maxLabelEl.textContent = '';
+          devMinLabelEl.textContent = '';
+          devMaxLabelEl.textContent = '';
+          zeroLineEl.style.display = 'none';
           return;
         }
         var values = history.map(function (p) { return p.v; });
@@ -115,26 +175,59 @@
         if (min === max) { min -= 1; max += 1; }
         minLabelEl.textContent = fmtNt(min) + ' nT';
         maxLabelEl.textContent = fmtNt(max) + ' nT';
-        var left = 40, right = 592, top = 12, bottom = 160;
-        var range = max - min || 1;
-        var n = history.length;
-        var d = '';
-        for (var i = 0; i < n; i++) {
-          var x = left + (i / Math.max(1, n - 1)) * (right - left);
-          var y = bottom - ((history[i].v - min) / range) * (bottom - top);
-          d += (i === 0 ? 'M' : 'L') + x.toFixed(1) + ',' + y.toFixed(1) + ' ';
-        }
-        trendEl.setAttribute('d', d.trim());
+        trendEl.setAttribute('d', pathFromHistory(history, min, max, top, bottom, left, right));
         placeholderEl.style.display = 'none';
+        if (devHistory.length >= 2) {
+          var dvals = devHistory.map(function (p) { return p.v; });
+          var dmin = Math.min.apply(null, dvals);
+          var dmax = Math.max.apply(null, dvals);
+          var span = Math.max(Math.abs(dmin), Math.abs(dmax), Number(alarmThreshold) || 1);
+          dmin = -span;
+          dmax = span;
+          devMinLabelEl.textContent = dmin.toFixed(2);
+          devMaxLabelEl.textContent = dmax.toFixed(2);
+          devTrendEl.setAttribute('d', pathFromHistory(devHistory, dmin, dmax, top, bottom, left, right));
+          var zeroY = bottom - ((0 - dmin) / (dmax - dmin || 1)) * (bottom - top);
+          zeroLineEl.setAttribute('y1', zeroY.toFixed(1));
+          zeroLineEl.setAttribute('y2', zeroY.toFixed(1));
+          zeroLineEl.style.display = '';
+        } else {
+          devTrendEl.setAttribute('d', '');
+          devMinLabelEl.textContent = '';
+          devMaxLabelEl.textContent = '';
+          zeroLineEl.style.display = 'none';
+        }
       }
 
-      function pushSample(v, t) {
-        if (!Number.isFinite(v)) return;
-        latestValue = v;
-        history.push({ v: v, t: t || Date.now() });
-        if (history.length > MAX_SAMPLES) {
-          history.splice(0, history.length - MAX_SAMPLES);
+      function setAlarm(active) {
+        document.body.classList.toggle('alarm', !!active);
+      }
+
+      function pushSample(parsed) {
+        if (!parsed) return;
+        var t = parsed.unix_ms || Date.now();
+        if (parsed.field_nt != null) {
+          var v = Number(parsed.field_nt);
+          if (Number.isFinite(v)) {
+            latestValue = v;
+            history.push({ v: v, t: t });
+            if (history.length > MAX_SAMPLES) {
+              history.splice(0, history.length - MAX_SAMPLES);
+            }
+          }
         }
+        if (parsed.deviation_nt != null) {
+          var dv = Number(parsed.deviation_nt);
+          if (Number.isFinite(dv)) {
+            devHistory.push({ v: dv, t: t });
+            if (devHistory.length > MAX_SAMPLES) {
+              devHistory.splice(0, devHistory.length - MAX_SAMPLES);
+            }
+          }
+        }
+        if (parsed.avg_window_s) avgWindow = Number(parsed.avg_window_s);
+        if (parsed.alarm_threshold_nt != null) alarmThreshold = Number(parsed.alarm_threshold_nt);
+        if (parsed.alarm !== undefined) setAlarm(!!parsed.alarm);
         render();
       }
 
@@ -154,8 +247,11 @@
         }
         if (s.last_parsed && s.last_parsed.field_nt != null) {
           latestValue = Number(s.last_parsed.field_nt);
-          latestEl.textContent = fmtNt(latestValue);
         }
+        if (s.avg_window_s) avgWindow = Number(s.avg_window_s);
+        if (s.alarm_threshold_nt != null) alarmThreshold = Number(s.alarm_threshold_nt);
+        if (s.last_alarm !== undefined) setAlarm(!!s.last_alarm);
+        render();
       }
 
       fetch('/api/status').then(function (r) { return r.json(); }).then(applyStatus).catch(function () {});
@@ -167,8 +263,15 @@
         es.onmessage = function (ev) {
           try {
             var msg = JSON.parse(ev.data);
-            if (msg.type === 'parsed' && msg.data && msg.data.field_nt != null) {
-              pushSample(Number(msg.data.field_nt), msg.data.unix_ms || Date.now());
+            if (msg.type === 'init' && msg.settings) {
+              if (msg.settings.avg_window_s) avgWindow = Number(msg.settings.avg_window_s);
+              if (msg.settings.alarm_threshold_nt != null) alarmThreshold = Number(msg.settings.alarm_threshold_nt);
+              render();
+            } else if (msg.type === 'parsed' && msg.data) {
+              pushSample(msg.data);
+            } else if (msg.type === 'avg_window') {
+              if (msg.avg_window_s) avgWindow = Number(msg.avg_window_s);
+              render();
             } else if (msg.type === 'status') {
               fetch('/api/status').then(function (r) { return r.json(); }).then(applyStatus).catch(function () {});
             }

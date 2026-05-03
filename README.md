@@ -3,12 +3,15 @@
 BlueOS extension for a **Marine Magnetics Explorer** towed magnetometer. It:
 
 - Opens a user-selected **USB serial** port and baud rate (persisted in `state.json` on the logs volume).
-- Sends the Explorer **`1`** command on connect to set **250 ms / 4 Hz** cycling.
+- Captures the **towfish serial number** by sending the Explorer `I` command on connect, then starts cycling at the persisted **sample rate** (`0` Off, `1` 4 Hz, `2` 2 Hz, `3` 1 Hz; defaults to 4 Hz).
 - Shows the **last 10 raw sentences** in the web UI.
-- Polls **GPS** from [Mavlink2Rest](http://host.docker.internal/mavlink2rest/) (`GLOBAL_POSITION_INT`).
+- Polls **GPS / vehicle state** from [Mavlink2Rest](http://host.docker.internal/mavlink2rest/) — `GLOBAL_POSITION_INT` (position), `VFR_HUD` (groundspeed + AHRS heading, used for layback bearing and synthetic NMEA), and `GPS_RAW_INT` (fix type, satellites, HDOP/VDOP).
 - Appends **CSV** logs under `/app/logs` with a new file per connection: `explorer_YYYYmmdd_HHMMSS.csv`.
-- Logs both the **vessel position** from Mavlink2Rest (`vessel_lat`, `vessel_lon`, `vessel_alt_m`) and the **estimated towfish position** (`towfish_lat`, `towfish_lon`) from layback offsets and motion bearing.
-- Sends **NAMED_VALUE_FLOAT** messages (total field, signal, depth, quality) to the autopilot log via Mavlink2Rest.
+- Writes per-session **raw text logs** to `/app/logs/RawMagYYYY-MM-DD.txt` and `RawGPSYYYY-MM-DD.txt`. The same process writes both files; for every received magnetometer sentence we append the raw mag line and a synthesised NMEA block (`$GPRMC`, `$GPGGA`, `$GPGSA`, `$GPGSV`) so the two files share the same row count and timestamps.
+- Logs both the **vessel position** (`vessel_lat`, `vessel_lon`, `vessel_alt_m`) and the **estimated towfish position** (`towfish_lat`, `towfish_lon`) from layback offsets and AHRS heading.
+- Computes a rolling **moving average** over a user-selectable window (4 / 10 / 15 / 30 / 60 / 120 s) and the **deviation** (`field_nT − moving_avg`). Triggers a UI/widget **alarm flash** + CSV `alarm` flag when `|deviation| > alarm_threshold_nt`.
+- Sends **NAMED_VALUE_FLOAT** messages (total field, signal, depth, quality, deviation, alarm) to the autopilot log via Mavlink2Rest.
+- Lets the operator **sync the magnetometer's clock** to current UTC (system clock / GPS-disciplined) via the Explorer `T` command.
 
 The UI (Vue 2 + Vuetify) and fonts/scripts are **vendored in the Docker image** at build time so the vehicle does not need internet at runtime.
 
@@ -97,6 +100,41 @@ The first workflow run may fail until Docker Hub credentials are configured.
 | `MAG_SIG` | Signal strength |
 | `MAG_DEPTH` | Depth (m), `0` if absent |
 | `MAG_QUAL` | Quality / confidence, `0` if absent |
+| `MAG_DEV` | Deviation from the moving average (nT) |
+| `MAG_ALRM` | Alarm flag, `1.0` while `|deviation| > alarm_threshold_nt`, else `0.0` |
+
+## Settings (persisted in `state.json`)
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `port` | `""` | Serial device path (e.g. `/dev/ttyUSB0`) |
+| `baud_rate` | `9600` | One of 1200, 2400, 4800, 9600, 19200 |
+| `layback_x_m` | `0.0` | Lateral offset, +starboard / -port |
+| `layback_y_m` | `-5.0` | Longitudinal offset, +forward / -behind |
+| `sample_rate` | `"1"` | Explorer cycle command: `0` off, `1` 4 Hz, `2` 2 Hz, `3` 1 Hz |
+| `avg_window_s` | `15` | Moving-average window in seconds (one of 4 / 10 / 15 / 30 / 60 / 120) |
+| `alarm_threshold_nt` | `4.0` | Absolute deviation (nT) above which the alarm fires |
+
+## CSV columns (added by this version)
+
+`moving_avg_nt`, `deviation_nt`, `avg_window_s`, `alarm` are appended after `layback_y_m` and before `raw_sentence` so existing parsers that key off the header row continue to work.
+
+## Raw per-session text files
+
+For each connection session the extension also creates / appends to:
+
+- `RawMagYYYY-MM-DD.txt` — one raw Explorer sentence per line, byte-for-byte.
+- `RawGPSYYYY-MM-DD.txt` — one synthesised NMEA block (`$GPRMC` / `$GPGGA` / `$GPGSA` / `$GPGSV`) per mag sample, separated by blank lines. Speed comes from `VFR_HUD.groundspeed`, course from `VFR_HUD.heading`, sat count + HDOP from `GPS_RAW_INT`.
+
+Both files are listed alongside CSVs on the **Logs** tab and exposed at `/api/logs/<name>` for download.
+
+## HTTP API additions
+
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| POST | `/api/explorer/sync-time` | (none) | Sends `T` + 11-digit `JJJYYHHMMSS` (UTC). Refuses if there is no fresh GPS fix. |
+| POST | `/api/avg-window` | `{"window_s": 15}` | Updates and persists the moving-average window. |
+| POST | `/api/explorer/command` | `{"command": "cycle_4hz"}` | Existing route now accepts `cycle_off`, `cycle_4hz`, `cycle_2hz`, `cycle_1hz`, `autotune_on`, `autotune_off`. Cycle commands also persist `sample_rate`. |
 
 ## Local development (optional)
 

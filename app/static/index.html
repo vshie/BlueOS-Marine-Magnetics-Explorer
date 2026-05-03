@@ -52,14 +52,61 @@
     .usb-port-cell.highlighted .port-type { color: #fff; }
     .field-chart {
       width: 100%;
-      height: 180px;
+      height: 220px;
       border: 1px solid #e6ecf2;
       border-radius: 4px;
       background: #fafbfc;
     }
-    .field-chart path { fill: none; stroke: #0a2540; stroke-width: 2; }
+    .field-chart path.field-line { fill: none; stroke: #0a2540; stroke-width: 2; }
+    .field-chart path.dev-line { fill: none; stroke: #f57c00; stroke-width: 1.5; }
     .field-chart .axis { stroke: #cfd8e3; stroke-width: 1; }
+    .field-chart .axis-r { stroke: #cfd8e3; stroke-width: 1; stroke-dasharray: 2,2; }
     .field-chart .chart-label { fill: #5c6b7a; font-size: 11px; }
+    .field-chart .chart-label-r { fill: #f57c00; font-size: 11px; }
+    .field-chart .zero-line { stroke: #f57c00; stroke-width: 0.6; stroke-dasharray: 4,4; opacity: 0.5; }
+
+    .chart-legend {
+      display: flex;
+      gap: 16px;
+      font-size: 11px;
+      color: #5c6b7a;
+      margin-bottom: 4px;
+    }
+    .chart-legend .swatch { display: inline-block; width: 14px; height: 3px; vertical-align: middle; margin-right: 4px; border-radius: 2px; }
+    .chart-legend .swatch.field { background: #0a2540; }
+    .chart-legend .swatch.dev { background: #f57c00; }
+
+    .rate-btn-group, .window-btn-group { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+    .rate-btn-group .v-btn--active, .window-btn-group .v-btn--active {
+      background-color: #0a2540 !important;
+      color: white !important;
+    }
+
+    @keyframes alarmPulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(198, 40, 40, 0.7); }
+      50%      { box-shadow: 0 0 0 6px rgba(198, 40, 40, 0.0); }
+    }
+    .alarm-banner {
+      background: #c62828;
+      color: white;
+      padding: 8px 16px;
+      font-weight: 600;
+      animation: alarmPulse 1s infinite;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .alarm-flash { animation: alarmPulse 1s infinite; border: 2px solid #c62828 !important; }
+
+    .footer-banner {
+      width: 100%;
+      display: flex;
+      justify-content: center;
+      padding: 24px 8px 8px 8px;
+      background: transparent;
+    }
+    .footer-banner img { max-width: 100%; height: auto; max-height: 220px; display: block; }
   </style>
 </head>
 <body>
@@ -68,8 +115,11 @@
       <v-app-bar app flat color="white" class="elevation-1" style="border-bottom: 2px solid #0a2540;">
         <v-toolbar-title class="primary--text font-weight-bold">Marine Magnetics Explorer</v-toolbar-title>
         <v-spacer></v-spacer>
-        <v-chip small outlined color="primary" v-if="connected">
-          <v-icon left small>mdi-serial-port</v-icon>Serial
+        <v-chip v-if="towfishSerial" small outlined color="primary" class="ml-1" :title="towfishSerial">
+          <v-icon left small>mdi-tag</v-icon>Towfish: {{ towfishSerialShort }}
+        </v-chip>
+        <v-chip small outlined color="primary" v-if="connected" class="ml-1">
+          <v-icon left small>mdi-serial-port</v-icon>Serial · {{ sampleRateLabel }}
         </v-chip>
         <v-chip small outlined :color="gpsOk ? 'success' : 'grey'" class="ml-1">
           <v-icon left small>mdi-crosshairs-gps</v-icon>GPS {{ gpsLabel }}
@@ -130,29 +180,99 @@
               </v-row>
 
               <v-row dense class="mt-1">
-                <v-col cols="12" class="d-flex flex-wrap align-center" style="gap: 8px;">
-                  <span class="text-caption grey--text text--darken-2">Auto-tune (manual: X = on, Y = off):</span>
+                <v-col cols="12" class="d-flex flex-wrap align-center" style="gap: 12px;">
+                  <span class="text-caption grey--text text--darken-2">Sample rate (Explorer cycle command):</span>
+                  <div class="rate-btn-group">
+                    <v-btn
+                      v-for="opt in sampleRateOptions"
+                      :key="'rate-' + opt.key"
+                      x-small
+                      :color="sampleRate === opt.key ? 'primary' : 'grey lighten-2'"
+                      :class="{ 'v-btn--active': sampleRate === opt.key }"
+                      :disabled="!connected"
+                      :title="'Send ' + opt.key + ' (' + opt.label + ')'"
+                      @click="sendExplorerCommand(opt.command)"
+                    >{{ opt.label }}</v-btn>
+                  </div>
+                  <v-divider vertical></v-divider>
+                  <span class="text-caption grey--text text--darken-2">Auto-tune (X / Y):</span>
                   <v-btn
-                    small color="primary" depressed
+                    x-small color="primary" depressed
                     :loading="autotuneBusy === 'on'"
                     :disabled="!connected || autotuneBusy !== ''"
                     @click="sendExplorerCommand('autotune_on')"
                     title="Send X to enable auto-tune"
                   >
-                    <v-icon left small>mdi-tune-vertical</v-icon>Auto-tune ON (X)
+                    <v-icon left small>mdi-tune-vertical</v-icon>ON
                   </v-btn>
                   <v-btn
-                    small color="primary" outlined
+                    x-small color="primary" outlined
                     :loading="autotuneBusy === 'off'"
                     :disabled="!connected || autotuneBusy !== ''"
                     @click="sendExplorerCommand('autotune_off')"
                     title="Send Y to disable auto-tune"
                   >
-                    <v-icon left small>mdi-tune-vertical-variant</v-icon>Auto-tune OFF (Y)
+                    <v-icon left small>mdi-tune-vertical-variant</v-icon>OFF
                   </v-btn>
-                  <v-chip v-if="lastExplorerCommand" small outlined :color="lastExplorerCommandOk ? 'success' : 'error'">
+                  <v-divider vertical></v-divider>
+                  <v-btn
+                    x-small color="primary" outlined
+                    :loading="syncTimeBusy"
+                    :disabled="!connected || !gpsOk"
+                    @click="syncExplorerTime"
+                    title="Send T + 11-digit JJJYYHHMMSS using current UTC (requires fresh GPS fix)"
+                  >
+                    <v-icon left small>mdi-clock-outline</v-icon>Sync time
+                  </v-btn>
+                  <v-chip v-if="lastTimeSync" x-small outlined>
+                    Last sync: {{ lastTimeSync }}
+                  </v-chip>
+                  <v-chip v-if="lastExplorerCommand" x-small outlined :color="lastExplorerCommandOk ? 'success' : 'error'">
                     Last: {{ lastExplorerCommand }} — {{ lastExplorerCommandMsg }}
                   </v-chip>
+                </v-col>
+              </v-row>
+
+              <v-row dense class="mt-2">
+                <v-col cols="12" class="d-flex flex-wrap align-center" style="gap: 12px;">
+                  <span class="text-caption grey--text text--darken-2">Deviation window:</span>
+                  <div class="window-btn-group">
+                    <v-btn
+                      v-for="w in avgWindowChoices"
+                      :key="'win-' + w"
+                      x-small
+                      :color="avgWindow === w ? 'primary' : 'grey lighten-2'"
+                      :class="{ 'v-btn--active': avgWindow === w }"
+                      @click="setAvgWindow(w)"
+                    >{{ w }}s</v-btn>
+                  </div>
+                  <v-text-field
+                    v-model.number="alarmThreshold"
+                    label="Alarm threshold (nT)"
+                    type="number"
+                    step="0.1"
+                    min="0"
+                    outlined dense hide-details
+                    color="primary"
+                    style="max-width: 180px;"
+                    @change="saveSettingsDebounced"
+                  ></v-text-field>
+                  <v-chip x-small outlined>Avg: {{ formatNt(movingAvgNt) }} nT</v-chip>
+                  <v-chip x-small outlined :color="deviationChipColor">
+                    Dev: {{ formatDev(deviationNt) }} nT
+                  </v-chip>
+                  <v-chip v-if="alarm" x-small color="error" text-color="white">
+                    <v-icon left x-small>mdi-alert</v-icon>ALARM
+                  </v-chip>
+                </v-col>
+              </v-row>
+
+              <v-row v-if="alarm" dense class="mt-2">
+                <v-col cols="12">
+                  <div class="alarm-banner">
+                    <v-icon dark>mdi-alert-octagon</v-icon>
+                    <span>ALARM — deviation {{ formatDev(deviationNt) }} nT exceeds threshold {{ formatDev(alarmThreshold) }} nT (window {{ avgWindow }}s)</span>
+                  </div>
                 </v-col>
               </v-row>
 
@@ -300,7 +420,15 @@
                     <v-card-text>
                       <v-simple-table dense v-if="lastParsed">
                         <tbody>
+                          <tr v-if="towfishSerial"><td>Towfish serial</td><td class="font-weight-medium">{{ towfishSerial }}</td></tr>
                           <tr><td>Field (nT)</td><td class="font-weight-medium">{{ lastParsed.field_nt }}</td></tr>
+                          <tr><td>Moving avg ({{ avgWindow }}s)</td><td>{{ formatNt(lastParsed.moving_avg_nt) }}</td></tr>
+                          <tr><td>Deviation</td>
+                            <td :class="{ 'red--text': alarm, 'font-weight-medium': true }">
+                              {{ formatDev(lastParsed.deviation_nt) }}
+                              <span v-if="alarm" class="ml-2"><v-icon x-small color="error">mdi-alert</v-icon> ALARM</span>
+                            </td>
+                          </tr>
                           <tr><td>Signal</td><td>{{ lastParsed.signal }}</td></tr>
                           <tr><td>Depth (m)</td><td>{{ lastParsed.depth_m != null ? lastParsed.depth_m : '—' }}</td></tr>
                           <tr><td>Quality</td><td>{{ lastParsed.quality != null ? lastParsed.quality : '—' }}</td></tr>
@@ -308,7 +436,7 @@
                           <tr><td>Larmor (ms)</td><td>{{ lastParsed.larmor_ms }}</td></tr>
                           <tr><td>Vessel lat</td><td>{{ gpsLat != null ? gpsLat.toFixed(7) : '—' }}</td></tr>
                           <tr><td>Vessel lon</td><td>{{ gpsLon != null ? gpsLon.toFixed(7) : '—' }}</td></tr>
-                          <tr><td>Vessel bearing</td><td>{{ lastParsed.vessel_bearing_deg != null ? lastParsed.vessel_bearing_deg.toFixed(1) + '°' : '—' }}</td></tr>
+                          <tr><td>Vessel bearing (AHRS)</td><td>{{ lastParsed.vessel_bearing_deg != null ? lastParsed.vessel_bearing_deg.toFixed(1) + '°' : '—' }}</td></tr>
                           <tr><td>Towfish lat</td><td>{{ lastParsed.towfish_lat != null ? lastParsed.towfish_lat.toFixed(7) : '—' }}</td></tr>
                           <tr><td>Towfish lon</td><td>{{ lastParsed.towfish_lon != null ? lastParsed.towfish_lon.toFixed(7) : '—' }}</td></tr>
                         </tbody>
@@ -321,9 +449,9 @@
 
               <v-row dense class="mt-4">
                 <v-col cols="12">
-                  <v-card outlined>
+                  <v-card outlined :class="{ 'alarm-flash': alarm }">
                     <v-card-title class="py-2 subtitle-1 primary--text d-flex align-center">
-                      <span>Field trend (last {{ fieldHistory.length }} / 300 samples)</span>
+                      <span>Field & deviation trend (last {{ fieldHistory.length }} / 300 samples)</span>
                       <v-spacer></v-spacer>
                       <v-btn
                         x-small text color="primary"
@@ -334,13 +462,22 @@
                       </v-btn>
                     </v-card-title>
                     <v-card-text>
-                      <svg class="field-chart" viewBox="0 0 600 180" preserveAspectRatio="none">
-                        <line class="axis" x1="28" y1="145" x2="590" y2="145"></line>
-                        <line class="axis" x1="28" y1="15" x2="28" y2="145"></line>
-                        <text class="chart-label" x="35" y="24">{{ chartMaxLabel }}</text>
-                        <text class="chart-label" x="35" y="140">{{ chartMinLabel }}</text>
-                        <path v-if="chartPath" :d="chartPath"></path>
-                        <text v-else class="chart-label" x="250" y="90">Waiting for samples...</text>
+                      <div class="chart-legend">
+                        <span><span class="swatch field"></span>Field (nT)</span>
+                        <span><span class="swatch dev"></span>Deviation from {{ avgWindow }}s avg (nT)</span>
+                      </div>
+                      <svg class="field-chart" viewBox="0 0 600 220" preserveAspectRatio="none">
+                        <line class="axis" x1="44" y1="180" x2="556" y2="180"></line>
+                        <line class="axis" x1="44" y1="15" x2="44" y2="180"></line>
+                        <line class="axis-r" x1="556" y1="15" x2="556" y2="180"></line>
+                        <text class="chart-label" x="6" y="20">{{ chartMaxLabel }}</text>
+                        <text class="chart-label" x="6" y="178">{{ chartMinLabel }}</text>
+                        <text class="chart-label-r" x="560" y="20">{{ devMaxLabel }}</text>
+                        <text class="chart-label-r" x="560" y="178">{{ devMinLabel }}</text>
+                        <line v-if="zeroDevY != null" class="zero-line" x1="44" x2="556" :y1="zeroDevY" :y2="zeroDevY"></line>
+                        <path v-if="chartPath" class="field-line" :d="chartPath"></path>
+                        <path v-if="devChartPath" class="dev-line" :d="devChartPath"></path>
+                        <text v-if="!chartPath" class="chart-label" x="250" y="100">Waiting for samples...</text>
                       </svg>
                     </v-card-text>
                   </v-card>
@@ -385,6 +522,13 @@
             </v-tab-item>
           </v-tabs-items>
         </v-container>
+        <div class="footer-banner">
+          <img
+            src="/static/img/blueos-explorer-banner.png"
+            alt="BlueOS Marine Magnetics Explorer"
+            onerror="this.style.display='none';"
+          />
+        </div>
       </v-main>
     </v-app>
   </div>
@@ -413,6 +557,7 @@
           tab: 0,
           busy: false,
           autotuneBusy: '',
+          syncTimeBusy: false,
           lastExplorerCommand: '',
           lastExplorerCommandMsg: '',
           lastExplorerCommandOk: true,
@@ -427,6 +572,7 @@
           connected: false,
           liveLines: [],
           fieldHistory: [],
+          devHistory: [],
           lastParsed: null,
           gpsLat: null,
           gpsLon: null,
@@ -442,6 +588,7 @@
           logHeaders: [
             { text: '', value: 'current', width: '80px' },
             { text: 'File', value: 'name' },
+            { text: 'Type', value: 'kind' },
             { text: 'Size', value: 'size_bytes' },
             { text: 'Modified', value: 'mtime' },
             { text: 'Rows', value: 'row_count' },
@@ -452,6 +599,17 @@
           deviceIds: [],
           hoveredUsbPosition: null,
           devicePanel: 0,
+          // New surveyor-feedback state
+          towfishSerial: null,
+          sampleRate: '1',
+          sampleRateLabels: { '0': 'Off', '1': '4 Hz', '2': '2 Hz', '3': '1 Hz' },
+          avgWindow: 15,
+          avgWindowChoices: [4, 10, 15, 30, 60, 120],
+          alarmThreshold: 4.0,
+          movingAvgNt: null,
+          deviationNt: null,
+          alarm: false,
+          lastTimeSync: null,
         };
       },
       computed: {
@@ -465,38 +623,68 @@
           if (this.gpsLat == null || this.gpsLon == null) return 'no fix';
           return 'fix';
         },
+        sampleRateLabel() {
+          return this.sampleRateLabels[this.sampleRate] || this.sampleRate;
+        },
+        sampleRateOptions() {
+          return [
+            { key: '0', label: 'Off',  command: 'cycle_off' },
+            { key: '1', label: '4 Hz', command: 'cycle_4hz' },
+            { key: '2', label: '2 Hz', command: 'cycle_2hz' },
+            { key: '3', label: '1 Hz', command: 'cycle_1hz' },
+          ];
+        },
+        towfishSerialShort() {
+          if (!this.towfishSerial) return '';
+          const first = String(this.towfishSerial).split('\n')[0];
+          return first.length > 24 ? first.slice(0, 24) + '…' : first;
+        },
+        deviationChipColor() {
+          if (this.alarm) return 'error';
+          if (this.deviationNt == null || !Number.isFinite(this.deviationNt)) return undefined;
+          return Math.abs(this.deviationNt) > this.alarmThreshold * 0.7 ? 'warning' : undefined;
+        },
         chartStats() {
           const values = this.fieldHistory.map((p) => p.v).filter((v) => Number.isFinite(v));
           if (!values.length) return { min: null, max: null };
           let min = Math.min(...values);
           let max = Math.max(...values);
-          if (min === max) {
-            min -= 1;
-            max += 1;
-          }
+          if (min === max) { min -= 1; max += 1; }
           return { min, max };
         },
+        devChartStats() {
+          const values = this.devHistory.map((p) => p.v).filter((v) => Number.isFinite(v));
+          if (!values.length) return { min: null, max: null };
+          let min = Math.min(...values);
+          let max = Math.max(...values);
+          // Symmetric around zero so the dashed zero-line sits in the middle
+          const span = Math.max(Math.abs(min), Math.abs(max), Number(this.alarmThreshold) || 1);
+          return { min: -span, max: span };
+        },
         chartPath() {
-          if (this.fieldHistory.length < 2) return '';
-          const { min, max } = this.chartStats;
-          if (min == null || max == null) return '';
-          const left = 28;
-          const right = 590;
-          const top = 15;
-          const bottom = 145;
+          return this._buildChartPath(this.fieldHistory, this.chartStats);
+        },
+        devChartPath() {
+          return this._buildChartPath(this.devHistory, this.devChartStats);
+        },
+        zeroDevY() {
+          const { min, max } = this.devChartStats;
+          if (min == null || max == null) return null;
+          const top = 15, bottom = 180;
           const range = max - min || 1;
-          const points = this.fieldHistory.map((p, i) => {
-            const x = left + (i / Math.max(1, this.fieldHistory.length - 1)) * (right - left);
-            const y = bottom - ((p.v - min) / range) * (bottom - top);
-            return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
-          });
-          return points.join(' ');
+          return (bottom - ((0 - min) / range) * (bottom - top)).toFixed(1);
         },
         chartMinLabel() {
           return this.chartStats.min == null ? '' : `${this.chartStats.min.toFixed(2)} nT`;
         },
         chartMaxLabel() {
           return this.chartStats.max == null ? '' : `${this.chartStats.max.toFixed(2)} nT`;
+        },
+        devMinLabel() {
+          return this.devChartStats.min == null ? '' : `${this.devChartStats.min.toFixed(2)}`;
+        },
+        devMaxLabel() {
+          return this.devChartStats.max == null ? '' : `${this.devChartStats.max.toFixed(2)}`;
         },
       },
       mounted() {
@@ -515,6 +703,32 @@
           if (Math.abs(n) >= 1000) return n.toFixed(1);
           if (Math.abs(n) >= 1) return n.toFixed(2);
           return n.toFixed(3);
+        },
+        formatNt(v) {
+          if (v == null) return '—';
+          const n = Number(v);
+          if (!Number.isFinite(n)) return '—';
+          if (Math.abs(n) >= 1000) return n.toFixed(1);
+          return n.toFixed(2);
+        },
+        formatDev(v) {
+          if (v == null) return '—';
+          const n = Number(v);
+          if (!Number.isFinite(n)) return '—';
+          return (n >= 0 ? '+' : '') + n.toFixed(2);
+        },
+        _buildChartPath(history, stats) {
+          if (!history || history.length < 2) return '';
+          const { min, max } = stats || {};
+          if (min == null || max == null) return '';
+          const left = 44, right = 556, top = 15, bottom = 180;
+          const range = max - min || 1;
+          const pts = history.map((p, i) => {
+            const x = left + (i / Math.max(1, history.length - 1)) * (right - left);
+            const y = bottom - ((p.v - min) / range) * (bottom - top);
+            return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
+          });
+          return pts.join(' ');
         },
         async fetchPorts() {
           this.portsLoading = true;
@@ -562,6 +776,11 @@
             this.baudRate = r.data.baud_rate || 9600;
             this.laybackX = Number(r.data.layback_x_m ?? 0);
             this.laybackY = Number(r.data.layback_y_m ?? -5);
+            if (r.data.sample_rate) this.sampleRate = String(r.data.sample_rate);
+            if (r.data.sample_rate_labels) this.sampleRateLabels = r.data.sample_rate_labels;
+            if (r.data.avg_window_s) this.avgWindow = Number(r.data.avg_window_s);
+            if (r.data.avg_window_choices) this.avgWindowChoices = r.data.avg_window_choices;
+            if (r.data.alarm_threshold_nt != null) this.alarmThreshold = Number(r.data.alarm_threshold_nt);
           } catch (e) { /* ignore */ }
         },
         saveSettingsDebounced() {
@@ -575,8 +794,36 @@
               baud_rate: this.baudRate,
               layback_x_m: Number(this.laybackX) || 0,
               layback_y_m: Number(this.laybackY) || 0,
+              sample_rate: this.sampleRate,
+              avg_window_s: Number(this.avgWindow) || 15,
+              alarm_threshold_nt: Number(this.alarmThreshold) || 0,
             });
           } catch (e) { /* ignore */ }
+        },
+        async setAvgWindow(w) {
+          const n = Number(w);
+          if (!this.avgWindowChoices.includes(n)) return;
+          this.avgWindow = n;
+          try {
+            await axios.post('/api/avg-window', { window_s: n });
+          } catch (e) { /* ignore */ }
+        },
+        async syncExplorerTime() {
+          if (this.syncTimeBusy) return;
+          this.syncTimeBusy = true;
+          try {
+            const r = await axios.post('/api/explorer/sync-time');
+            const d = r.data || {};
+            if (d.ok) {
+              this.lastTimeSync = `${d.sent} (${d.utc})`;
+            } else {
+              this.alertMsg = d.error || 'Time sync failed';
+            }
+          } catch (e) {
+            this.alertMsg = (e.response && e.response.data && e.response.data.error) || e.message || 'Time sync failed';
+          } finally {
+            this.syncTimeBusy = false;
+          }
         },
         openWidget() {
           window.open('/widget', '_blank', 'noopener');
@@ -591,6 +838,9 @@
             this.lastExplorerCommandOk = !!d.ok;
             this.lastExplorerCommand = (d.byte ? d.byte + ' ' : '') + name;
             this.lastExplorerCommandMsg = d.message || (d.ok ? 'sent' : 'failed');
+            if (d.ok && d.sample_rate) {
+              this.sampleRate = String(d.sample_rate);
+            }
           } catch (e) {
             this.lastExplorerCommandOk = false;
             this.lastExplorerCommand = name;
@@ -609,6 +859,11 @@
           try {
             await this.saveSettings();
             this.fieldHistory = [];
+            this.devHistory = [];
+            this.movingAvgNt = null;
+            this.deviationNt = null;
+            this.alarm = false;
+            this.towfishSerial = null;
             const r = await axios.post('/api/connect', {
               port: this.selectedPort,
               baud_rate: this.baudRate,
@@ -644,6 +899,13 @@
             this.liveLines = s.last_lines.slice().reverse();
           }
           if (s.last_parsed) this.lastParsed = s.last_parsed;
+          if (s.towfish_serial !== undefined) this.towfishSerial = s.towfish_serial;
+          if (s.sample_rate) this.sampleRate = String(s.sample_rate);
+          if (s.avg_window_s) this.avgWindow = Number(s.avg_window_s);
+          if (s.alarm_threshold_nt != null) this.alarmThreshold = Number(s.alarm_threshold_nt);
+          if (s.last_moving_avg_nt !== undefined) this.movingAvgNt = s.last_moving_avg_nt;
+          if (s.last_deviation_nt !== undefined) this.deviationNt = s.last_deviation_nt;
+          if (s.last_alarm !== undefined) this.alarm = !!s.last_alarm;
           const g = s.gps || {};
           if (g.lat != null && g.lon != null) {
             this.gpsLat = g.lat;
@@ -657,10 +919,23 @@
           if (!data || data.field_nt == null) return;
           const v = Number(data.field_nt);
           if (!Number.isFinite(v)) return;
-          this.fieldHistory.push({ t: data.unix_ms || Date.now(), v });
+          const t = data.unix_ms || Date.now();
+          this.fieldHistory.push({ t, v });
           if (this.fieldHistory.length > 300) {
             this.fieldHistory.splice(0, this.fieldHistory.length - 300);
           }
+          if (data.deviation_nt != null) {
+            const dv = Number(data.deviation_nt);
+            if (Number.isFinite(dv)) {
+              this.devHistory.push({ t, v: dv });
+              if (this.devHistory.length > 300) {
+                this.devHistory.splice(0, this.devHistory.length - 300);
+              }
+            }
+          }
+          if (data.moving_avg_nt != null) this.movingAvgNt = Number(data.moving_avg_nt);
+          if (data.deviation_nt != null) this.deviationNt = Number(data.deviation_nt);
+          if (data.alarm !== undefined) this.alarm = !!data.alarm;
         },
         pollStatus() {
           setInterval(() => this.refreshStatus(), 3000);
@@ -676,8 +951,13 @@
                   if (msg.settings.baud_rate) this.baudRate = msg.settings.baud_rate;
                   if (msg.settings.layback_x_m != null) this.laybackX = Number(msg.settings.layback_x_m);
                   if (msg.settings.layback_y_m != null) this.laybackY = Number(msg.settings.layback_y_m);
+                  if (msg.settings.sample_rate) this.sampleRate = String(msg.settings.sample_rate);
+                  if (msg.settings.avg_window_s) this.avgWindow = Number(msg.settings.avg_window_s);
+                  if (msg.settings.alarm_threshold_nt != null) this.alarmThreshold = Number(msg.settings.alarm_threshold_nt);
                 }
                 if (msg.baud_choices) this.baudChoices = msg.baud_choices;
+                if (msg.sample_rate_labels) this.sampleRateLabels = msg.sample_rate_labels;
+                if (msg.avg_window_choices) this.avgWindowChoices = msg.avg_window_choices;
               } else if (msg.type === 'raw_sentence') {
                 this.liveLines.unshift(msg.line);
                 if (this.liveLines.length > 10) this.liveLines.pop();
@@ -694,8 +974,16 @@
                 this.nvfLastStatus = msg.ok ? 'ok' : ('failed:' + (msg.name || ''));
                 if (msg.endpoint) this.nvfLastEndpoint = msg.endpoint;
                 if (msg.ok) this.nvfPostsOk += Object.keys(msg.sent || {}).length;
+              } else if (msg.type === 'avg_window') {
+                if (msg.avg_window_s) this.avgWindow = Number(msg.avg_window_s);
+              } else if (msg.type === 'explorer_command') {
+                if (msg.ok && msg.sample_rate) this.sampleRate = String(msg.sample_rate);
+              } else if (msg.type === 'explorer_time_sync') {
+                if (msg.ok) this.lastTimeSync = `${msg.sent} (${msg.utc})`;
               } else if (msg.type === 'status') {
                 this.connected = !!msg.connected;
+                if (msg.towfish_serial !== undefined) this.towfishSerial = msg.towfish_serial;
+                if (msg.sample_rate) this.sampleRate = String(msg.sample_rate);
                 if (!msg.connected) this.currentLog = null;
                 this.refreshStatus();
               }
