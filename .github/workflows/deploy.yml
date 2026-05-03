@@ -18,7 +18,10 @@ jobs:
           docker-username: ${{ secrets.DOCKER_USERNAME }}
           docker-password: ${{ secrets.DOCKER_PASSWORD }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          image-name: ${{ vars.IMAGE_NAME || 'blueos-marine-magnetics-explorer' }}
+          # NOTE: the action prepends image-prefix (default "blueos-") to image-name,
+          # so this MUST NOT itself start with "blueos-" or the published image becomes
+          # "vshie/blueos-blueos-marine-magnetics-explorer".
+          image-name: ${{ vars.IMAGE_NAME || 'marine-magnetics-explorer' }}
           author: ${{ vars.MY_NAME }}
           author-email: ${{ vars.MY_EMAIL }}
           maintainer: ${{ vars.ORG_NAME }}
