@@ -3,9 +3,14 @@ name: Deploy BlueOS Extension Image
 on:
   push:
 
+permissions:
+  contents: write
+
 jobs:
   deploy-docker-image:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Deploy BlueOS Extension
         uses: BlueOS-community/Deploy-BlueOS-Extension@v1.2.0
