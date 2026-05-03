@@ -40,6 +40,57 @@
     .legend .swatch { display: inline-block; width: 12px; height: 3px; vertical-align: middle; margin-right: 4px; border-radius: 2px; }
     .legend .swatch.field { background: var(--mme-line); }
     .legend .swatch.dev { background: var(--mme-dev); }
+
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+      font-size: 11px;
+      color: var(--mme-muted);
+      padding: 4px 6px;
+      border: 1px solid var(--mme-border);
+      border-radius: 4px;
+      background: var(--mme-card);
+      margin-bottom: 4px;
+    }
+    .controls .group { display: inline-flex; align-items: center; gap: 4px; }
+    .controls .group-label { font-weight: 600; color: var(--mme-muted); }
+    .controls button {
+      font-family: inherit;
+      font-size: 11px;
+      line-height: 1;
+      padding: 3px 6px;
+      border: 1px solid var(--mme-border);
+      border-radius: 3px;
+      background: var(--mme-bg);
+      color: var(--mme-fg);
+      cursor: pointer;
+      min-width: 24px;
+      transition: background-color 0.15s, color 0.15s, border-color 0.15s;
+    }
+    .controls button:hover:not(:disabled) {
+      border-color: var(--mme-line);
+      background: var(--mme-card);
+    }
+    .controls button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .controls button.active {
+      background: var(--mme-line);
+      color: var(--mme-bg);
+      border-color: var(--mme-line);
+    }
+    .controls .threshold-value {
+      display: inline-block;
+      min-width: 44px;
+      text-align: center;
+      font-variant-numeric: tabular-nums;
+      font-weight: 600;
+      color: var(--mme-fg);
+    }
+    .controls .saving { font-style: italic; opacity: 0.6; }
+    body.dark .controls button { background: var(--mme-card); color: var(--mme-fg); border-color: var(--mme-border); }
+    body.dark .controls button:hover:not(:disabled) { background: var(--mme-bg); }
+    body.dark .controls button.active { background: var(--mme-line); color: var(--mme-bg); border-color: var(--mme-line); }
     .alarm-pill { display: none; padding: 2px 8px; border-radius: 999px; background: #c62828; color: white; font-weight: 600; font-size: 11px; align-self: center; }
     body.alarm .alarm-pill { display: inline-block; }
     body.alarm .chart-wrap { border: 2px solid #c62828; animation: alarmPulse 1s infinite; }
@@ -63,6 +114,25 @@
 </head>
 <body>
   <div class="widget">
+    <div class="controls" id="controls">
+      <div class="group" id="window-group">
+        <span class="group-label">Avg</span>
+        <button type="button" data-window="4">4s</button>
+        <button type="button" data-window="10">10s</button>
+        <button type="button" data-window="15">15s</button>
+        <button type="button" data-window="30">30s</button>
+        <button type="button" data-window="60">60s</button>
+        <button type="button" data-window="120">120s</button>
+      </div>
+      <div class="group" id="threshold-group">
+        <span class="group-label">Threshold</span>
+        <button type="button" id="thr-down" title="Decrease threshold by 0.5 nT">&minus;</button>
+        <span class="threshold-value" id="thr-value">—</span>
+        <span class="group-label">nT</span>
+        <button type="button" id="thr-up" title="Increase threshold by 0.5 nT">+</button>
+      </div>
+      <span class="saving" id="save-status"></span>
+    </div>
     <div class="header">
       <span class="title">Magnetic field</span>
       <span class="meta" id="sample-count">0 / 300 samples</span>
@@ -127,6 +197,111 @@
       var modeEl = document.getElementById('connection-mode');
       var legendWindowEl = document.getElementById('legend-window');
       var thresholdInfoEl = document.getElementById('threshold-info');
+      var windowGroupEl = document.getElementById('window-group');
+      var windowBtnEls = windowGroupEl.querySelectorAll('button[data-window]');
+      var thrValueEl = document.getElementById('thr-value');
+      var thrDownEl = document.getElementById('thr-down');
+      var thrUpEl = document.getElementById('thr-up');
+      var saveStatusEl = document.getElementById('save-status');
+
+      var THRESHOLD_STEP = 0.5;   // nT per +/- click
+      var THRESHOLD_MIN = 0.0;
+      var THRESHOLD_MAX = 1000.0;
+      var thresholdSaveTimer = null;
+      var thresholdInFlight = null; // pending fetch promise; null when idle
+
+      function setSaveStatus(text, isError) {
+        saveStatusEl.textContent = text || '';
+        saveStatusEl.style.color = isError ? '#c62828' : '';
+      }
+
+      function updateWindowButtons() {
+        for (var i = 0; i < windowBtnEls.length; i++) {
+          var btn = windowBtnEls[i];
+          var v = parseInt(btn.getAttribute('data-window'), 10);
+          btn.classList.toggle('active', v === Number(avgWindow));
+        }
+      }
+
+      function updateThresholdDisplay() {
+        thrValueEl.textContent = (Number.isFinite(Number(alarmThreshold)) ? Number(alarmThreshold) : 0).toFixed(2);
+      }
+
+      function postWindow(n) {
+        setSaveStatus('saving…', false);
+        for (var i = 0; i < windowBtnEls.length; i++) windowBtnEls[i].disabled = true;
+        return fetch('/api/avg-window', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ window_s: Number(n) }),
+        }).then(function (r) {
+          if (!r.ok) return r.json().then(function (b) { throw new Error((b && b.error) || ('HTTP ' + r.status)); });
+          return r.json();
+        }).then(function (b) {
+          if (b && b.avg_window_s) avgWindow = Number(b.avg_window_s);
+          updateWindowButtons();
+          render();
+          setSaveStatus('', false);
+        }).catch(function (e) {
+          setSaveStatus(String(e.message || e), true);
+        }).then(function () {
+          for (var i = 0; i < windowBtnEls.length; i++) windowBtnEls[i].disabled = false;
+        });
+      }
+
+      function postThreshold(value) {
+        setSaveStatus('saving…', false);
+        thrUpEl.disabled = true;
+        thrDownEl.disabled = true;
+        var p = fetch('/api/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ alarm_threshold_nt: Number(value) }),
+        }).then(function (r) {
+          if (!r.ok) return r.json().then(function (b) { throw new Error((b && b.error) || ('HTTP ' + r.status)); });
+          return r.json();
+        }).then(function (b) {
+          if (b && b.alarm_threshold_nt != null) alarmThreshold = Number(b.alarm_threshold_nt);
+          updateThresholdDisplay();
+          render();
+          setSaveStatus('', false);
+        }).catch(function (e) {
+          setSaveStatus(String(e.message || e), true);
+        }).then(function () {
+          thrUpEl.disabled = false;
+          thrDownEl.disabled = false;
+          thresholdInFlight = null;
+        });
+        thresholdInFlight = p;
+        return p;
+      }
+
+      function bumpThreshold(delta) {
+        var cur = Number(alarmThreshold);
+        if (!Number.isFinite(cur)) cur = 0;
+        var next = cur + Number(delta);
+        if (next < THRESHOLD_MIN) next = THRESHOLD_MIN;
+        if (next > THRESHOLD_MAX) next = THRESHOLD_MAX;
+        next = Math.round(next * 100) / 100; // keep 2dp
+        alarmThreshold = next;
+        updateThresholdDisplay();
+        render();
+        if (thresholdSaveTimer) clearTimeout(thresholdSaveTimer);
+        thresholdSaveTimer = setTimeout(function () {
+          postThreshold(alarmThreshold);
+        }, 250);
+      }
+
+      for (var i = 0; i < windowBtnEls.length; i++) {
+        (function (btn) {
+          btn.addEventListener('click', function () {
+            var v = parseInt(btn.getAttribute('data-window'), 10);
+            if (Number.isFinite(v)) postWindow(v);
+          });
+        })(windowBtnEls[i]);
+      }
+      thrDownEl.addEventListener('click', function () { bumpThreshold(-THRESHOLD_STEP); });
+      thrUpEl.addEventListener('click', function () { bumpThreshold(THRESHOLD_STEP); });
 
       function fmtNt(v) {
         if (v == null || !Number.isFinite(v)) return '—';
@@ -157,6 +332,8 @@
         latestEl.textContent = fmtNt(latestValue);
         legendWindowEl.textContent = String(avgWindow);
         thresholdInfoEl.textContent = 'thr: ' + fmtNt(alarmThreshold) + ' nT';
+        updateWindowButtons();
+        updateThresholdDisplay();
         var left = 40, right = 560, top = 12, bottom = 160;
         if (history.length < 2) {
           trendEl.setAttribute('d', '');
