@@ -53,7 +53,7 @@ ENV PORT=9091
 EXPOSE 9091
 
 LABEL org.blueos.type="tool"
-LABEL org.blueos.version="1.0.1"
+LABEL org.blueos.version="1.0.2"
 LABEL org.blueos.requirements="core >= 1.1"
 LABEL org.blueos.name="Marine Magnetics Explorer"
 LABEL org.blueos.description="Explorer magnetometer serial logging with GPS and NAMED_VALUE_FLOAT to autopilot"

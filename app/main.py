@@ -1444,7 +1444,7 @@ def register_service():
             "description": "USB serial Explorer data with GPS; CSV logs and NAMED_VALUE_FLOAT to autopilot.",
             "icon": "mdi-magnet",
             "company": "Blue Robotics",
-            "version": "1.0.1",
+            "version": "1.0.2",
             "webpage": "https://github.com/vshie/BlueOS-Marine-Magnetics-Explorer",
             "api": "https://github.com/vshie/BlueOS-Marine-Magnetics-Explorer",
         }
