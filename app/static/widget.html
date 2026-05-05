@@ -87,6 +87,23 @@
       font-weight: 600;
       color: var(--mme-fg);
     }
+    .controls .threshold-input {
+      width: 60px;
+      font-family: inherit;
+      font-size: 11px;
+      padding: 3px 4px;
+      border: 1px solid var(--mme-border);
+      border-radius: 3px;
+      background: var(--mme-bg);
+      color: var(--mme-fg);
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+    .controls .threshold-input:disabled { opacity: 0.5; cursor: not-allowed; }
+    .controls .enable-label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; user-select: none; font-weight: 600; }
+    .controls .enable-label input[type="checkbox"] { margin: 0; cursor: pointer; }
+    .controls.alarm-off #threshold-group button,
+    .controls.alarm-off #threshold-group input { opacity: 0.4; }
     .controls .saving { font-style: italic; opacity: 0.6; }
     body.dark .controls button { background: var(--mme-card); color: var(--mme-fg); border-color: var(--mme-border); }
     body.dark .controls button:hover:not(:disabled) { background: var(--mme-bg); }
@@ -124,12 +141,18 @@
         <button type="button" data-window="60">60s</button>
         <button type="button" data-window="120">120s</button>
       </div>
+      <div class="group" id="enable-group">
+        <label class="enable-label" title="Enable / disable threshold alarm">
+          <input type="checkbox" id="alarm-enable" />
+          <span>Alarm</span>
+        </label>
+      </div>
       <div class="group" id="threshold-group">
         <span class="group-label">Threshold</span>
-        <button type="button" id="thr-down" title="Decrease threshold by 0.5 nT">&minus;</button>
-        <span class="threshold-value" id="thr-value">—</span>
+        <button type="button" id="thr-down" title="Decrease threshold by 5 nT">&minus;5</button>
+        <input type="number" id="thr-input" class="threshold-input" min="0" step="0.1" />
         <span class="group-label">nT</span>
-        <button type="button" id="thr-up" title="Increase threshold by 0.5 nT">+</button>
+        <button type="button" id="thr-up" title="Increase threshold by 5 nT">+5</button>
       </div>
       <span class="saving" id="save-status"></span>
     </div>
@@ -172,6 +195,7 @@
       var latestValue = null;
       var avgWindow = 15;
       var alarmThreshold = 4.0;
+      var alarmEnabled = true;
 
       var qs = new URLSearchParams(window.location.search);
       if ((qs.get('theme') || '').toLowerCase() === 'dark') {
@@ -199,12 +223,14 @@
       var thresholdInfoEl = document.getElementById('threshold-info');
       var windowGroupEl = document.getElementById('window-group');
       var windowBtnEls = windowGroupEl.querySelectorAll('button[data-window]');
-      var thrValueEl = document.getElementById('thr-value');
+      var controlsEl = document.getElementById('controls');
+      var thrInputEl = document.getElementById('thr-input');
       var thrDownEl = document.getElementById('thr-down');
       var thrUpEl = document.getElementById('thr-up');
+      var alarmEnableEl = document.getElementById('alarm-enable');
       var saveStatusEl = document.getElementById('save-status');
 
-      var THRESHOLD_STEP = 0.5;   // nT per +/- click
+      var THRESHOLD_STEP = 5.0;   // nT per +/- click
       var THRESHOLD_MIN = 0.0;
       var THRESHOLD_MAX = 1000.0;
       var thresholdSaveTimer = null;
@@ -224,7 +250,16 @@
       }
 
       function updateThresholdDisplay() {
-        thrValueEl.textContent = (Number.isFinite(Number(alarmThreshold)) ? Number(alarmThreshold) : 0).toFixed(2);
+        var v = Number(alarmThreshold);
+        if (!Number.isFinite(v)) v = 0;
+        if (document.activeElement !== thrInputEl) {
+          thrInputEl.value = (Math.round(v * 100) / 100).toString();
+        }
+        thrInputEl.disabled = !alarmEnabled;
+        thrDownEl.disabled = !alarmEnabled;
+        thrUpEl.disabled = !alarmEnabled;
+        if (alarmEnableEl.checked !== !!alarmEnabled) alarmEnableEl.checked = !!alarmEnabled;
+        controlsEl.classList.toggle('alarm-off', !alarmEnabled);
       }
 
       function postWindow(n) {
@@ -249,47 +284,72 @@
         });
       }
 
-      function postThreshold(value) {
+      function postSettings(payload) {
         setSaveStatus('saving…', false);
-        thrUpEl.disabled = true;
-        thrDownEl.disabled = true;
         var p = fetch('/api/settings', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ alarm_threshold_nt: Number(value) }),
+          body: JSON.stringify(payload),
         }).then(function (r) {
           if (!r.ok) return r.json().then(function (b) { throw new Error((b && b.error) || ('HTTP ' + r.status)); });
           return r.json();
         }).then(function (b) {
           if (b && b.alarm_threshold_nt != null) alarmThreshold = Number(b.alarm_threshold_nt);
+          if (b && b.alarm_enabled != null) alarmEnabled = !!b.alarm_enabled;
           updateThresholdDisplay();
           render();
           setSaveStatus('', false);
         }).catch(function (e) {
           setSaveStatus(String(e.message || e), true);
         }).then(function () {
-          thrUpEl.disabled = false;
-          thrDownEl.disabled = false;
           thresholdInFlight = null;
         });
         thresholdInFlight = p;
         return p;
       }
 
+      function clampThreshold(v) {
+        if (!Number.isFinite(v)) v = 0;
+        if (v < THRESHOLD_MIN) v = THRESHOLD_MIN;
+        if (v > THRESHOLD_MAX) v = THRESHOLD_MAX;
+        return Math.round(v * 100) / 100;
+      }
+
       function bumpThreshold(delta) {
-        var cur = Number(alarmThreshold);
-        if (!Number.isFinite(cur)) cur = 0;
-        var next = cur + Number(delta);
-        if (next < THRESHOLD_MIN) next = THRESHOLD_MIN;
-        if (next > THRESHOLD_MAX) next = THRESHOLD_MAX;
-        next = Math.round(next * 100) / 100; // keep 2dp
-        alarmThreshold = next;
+        if (!alarmEnabled) return;
+        alarmThreshold = clampThreshold(Number(alarmThreshold) + Number(delta));
         updateThresholdDisplay();
         render();
         if (thresholdSaveTimer) clearTimeout(thresholdSaveTimer);
         thresholdSaveTimer = setTimeout(function () {
-          postThreshold(alarmThreshold);
+          postSettings({ alarm_threshold_nt: alarmThreshold });
         }, 250);
+      }
+
+      function commitManualThreshold() {
+        if (!alarmEnabled) return;
+        var raw = thrInputEl.value;
+        var v = parseFloat(raw);
+        if (!Number.isFinite(v)) {
+          updateThresholdDisplay();
+          return;
+        }
+        alarmThreshold = clampThreshold(v);
+        updateThresholdDisplay();
+        render();
+        if (thresholdSaveTimer) clearTimeout(thresholdSaveTimer);
+        postSettings({ alarm_threshold_nt: alarmThreshold });
+      }
+
+      function toggleAlarmEnabled() {
+        alarmEnabled = !!alarmEnableEl.checked;
+        if (!alarmEnabled) {
+          document.body.classList.remove('alarm');
+        }
+        updateThresholdDisplay();
+        render();
+        if (thresholdSaveTimer) clearTimeout(thresholdSaveTimer);
+        postSettings({ alarm_enabled: alarmEnabled });
       }
 
       for (var i = 0; i < windowBtnEls.length; i++) {
@@ -302,6 +362,15 @@
       }
       thrDownEl.addEventListener('click', function () { bumpThreshold(-THRESHOLD_STEP); });
       thrUpEl.addEventListener('click', function () { bumpThreshold(THRESHOLD_STEP); });
+      thrInputEl.addEventListener('change', commitManualThreshold);
+      thrInputEl.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Enter') {
+          ev.preventDefault();
+          thrInputEl.blur();
+          commitManualThreshold();
+        }
+      });
+      alarmEnableEl.addEventListener('change', toggleAlarmEnabled);
 
       function fmtNt(v) {
         if (v == null || !Number.isFinite(v)) return '—';
@@ -377,7 +446,7 @@
       }
 
       function setAlarm(active) {
-        document.body.classList.toggle('alarm', !!active);
+        document.body.classList.toggle('alarm', !!active && alarmEnabled);
       }
 
       function pushSample(parsed) {
@@ -404,6 +473,7 @@
         }
         if (parsed.avg_window_s) avgWindow = Number(parsed.avg_window_s);
         if (parsed.alarm_threshold_nt != null) alarmThreshold = Number(parsed.alarm_threshold_nt);
+        if (parsed.alarm_enabled != null) alarmEnabled = !!parsed.alarm_enabled;
         if (parsed.alarm !== undefined) setAlarm(!!parsed.alarm);
         render();
       }
@@ -427,6 +497,7 @@
         }
         if (s.avg_window_s) avgWindow = Number(s.avg_window_s);
         if (s.alarm_threshold_nt != null) alarmThreshold = Number(s.alarm_threshold_nt);
+        if (s.alarm_enabled != null) alarmEnabled = !!s.alarm_enabled;
         if (s.last_alarm !== undefined) setAlarm(!!s.last_alarm);
         render();
       }
@@ -443,10 +514,19 @@
             if (msg.type === 'init' && msg.settings) {
               if (msg.settings.avg_window_s) avgWindow = Number(msg.settings.avg_window_s);
               if (msg.settings.alarm_threshold_nt != null) alarmThreshold = Number(msg.settings.alarm_threshold_nt);
+              if (msg.settings.alarm_enabled != null) alarmEnabled = !!msg.settings.alarm_enabled;
               render();
             } else if (msg.type === 'parsed' && msg.data) {
               pushSample(msg.data);
             } else if (msg.type === 'avg_window') {
+              if (msg.avg_window_s) avgWindow = Number(msg.avg_window_s);
+              render();
+            } else if (msg.type === 'settings') {
+              if (msg.alarm_threshold_nt != null) alarmThreshold = Number(msg.alarm_threshold_nt);
+              if (msg.alarm_enabled != null) {
+                alarmEnabled = !!msg.alarm_enabled;
+                if (!alarmEnabled) document.body.classList.remove('alarm');
+              }
               if (msg.avg_window_s) avgWindow = Number(msg.avg_window_s);
               render();
             } else if (msg.type === 'status') {

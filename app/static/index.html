@@ -246,28 +246,57 @@
                       @click="setAvgWindow(w)"
                     >{{ w }}s</v-btn>
                   </div>
+                  <v-switch
+                    v-model="alarmEnabled"
+                    label="Alarm"
+                    color="error"
+                    hide-details
+                    dense
+                    class="mt-0 pt-0"
+                    @change="onAlarmEnabledChange"
+                  ></v-switch>
+                  <v-btn
+                    x-small
+                    outlined
+                    color="primary"
+                    :disabled="!alarmEnabled"
+                    @click="bumpThreshold(-5)"
+                    title="Decrease threshold by 5 nT"
+                  >&minus;5</v-btn>
                   <v-text-field
                     v-model.number="alarmThreshold"
+                    :disabled="!alarmEnabled"
                     label="Alarm threshold (nT)"
                     type="number"
                     step="0.1"
                     min="0"
                     outlined dense hide-details
                     color="primary"
-                    style="max-width: 180px;"
+                    style="max-width: 160px;"
                     @change="saveSettingsDebounced"
                   ></v-text-field>
+                  <v-btn
+                    x-small
+                    outlined
+                    color="primary"
+                    :disabled="!alarmEnabled"
+                    @click="bumpThreshold(5)"
+                    title="Increase threshold by 5 nT"
+                  >+5</v-btn>
                   <v-chip x-small outlined>Avg: {{ formatNt(movingAvgNt) }} nT</v-chip>
                   <v-chip x-small outlined :color="deviationChipColor">
                     Dev: {{ formatDev(deviationNt) }} nT
                   </v-chip>
-                  <v-chip v-if="alarm" x-small color="error" text-color="white">
+                  <v-chip v-if="alarm && alarmEnabled" x-small color="error" text-color="white">
                     <v-icon left x-small>mdi-alert</v-icon>ALARM
+                  </v-chip>
+                  <v-chip v-else-if="!alarmEnabled" x-small outlined color="grey">
+                    Alarm off
                   </v-chip>
                 </v-col>
               </v-row>
 
-              <v-row v-if="alarm" dense class="mt-2">
+              <v-row v-if="alarm && alarmEnabled" dense class="mt-2">
                 <v-col cols="12">
                   <div class="alarm-banner">
                     <v-icon dark>mdi-alert-octagon</v-icon>
@@ -606,6 +635,7 @@
           avgWindow: 15,
           avgWindowChoices: [4, 10, 15, 30, 60, 120],
           alarmThreshold: 4.0,
+          alarmEnabled: true,
           movingAvgNt: null,
           deviationNt: null,
           alarm: false,
@@ -781,6 +811,7 @@
             if (r.data.avg_window_s) this.avgWindow = Number(r.data.avg_window_s);
             if (r.data.avg_window_choices) this.avgWindowChoices = r.data.avg_window_choices;
             if (r.data.alarm_threshold_nt != null) this.alarmThreshold = Number(r.data.alarm_threshold_nt);
+            if (r.data.alarm_enabled != null) this.alarmEnabled = !!r.data.alarm_enabled;
           } catch (e) { /* ignore */ }
         },
         saveSettingsDebounced() {
@@ -797,8 +828,22 @@
               sample_rate: this.sampleRate,
               avg_window_s: Number(this.avgWindow) || 15,
               alarm_threshold_nt: Number(this.alarmThreshold) || 0,
+              alarm_enabled: !!this.alarmEnabled,
             });
           } catch (e) { /* ignore */ }
+        },
+        bumpThreshold(delta) {
+          let cur = Number(this.alarmThreshold);
+          if (!Number.isFinite(cur)) cur = 0;
+          let next = cur + Number(delta);
+          if (next < 0) next = 0;
+          next = Math.round(next * 10) / 10;
+          this.alarmThreshold = next;
+          this.saveSettingsDebounced();
+        },
+        onAlarmEnabledChange() {
+          if (!this.alarmEnabled) this.alarm = false;
+          this.saveSettingsDebounced();
         },
         async setAvgWindow(w) {
           const n = Number(w);
@@ -903,6 +948,7 @@
           if (s.sample_rate) this.sampleRate = String(s.sample_rate);
           if (s.avg_window_s) this.avgWindow = Number(s.avg_window_s);
           if (s.alarm_threshold_nt != null) this.alarmThreshold = Number(s.alarm_threshold_nt);
+          if (s.alarm_enabled != null) this.alarmEnabled = !!s.alarm_enabled;
           if (s.last_moving_avg_nt !== undefined) this.movingAvgNt = s.last_moving_avg_nt;
           if (s.last_deviation_nt !== undefined) this.deviationNt = s.last_deviation_nt;
           if (s.last_alarm !== undefined) this.alarm = !!s.last_alarm;
@@ -954,6 +1000,7 @@
                   if (msg.settings.sample_rate) this.sampleRate = String(msg.settings.sample_rate);
                   if (msg.settings.avg_window_s) this.avgWindow = Number(msg.settings.avg_window_s);
                   if (msg.settings.alarm_threshold_nt != null) this.alarmThreshold = Number(msg.settings.alarm_threshold_nt);
+                  if (msg.settings.alarm_enabled != null) this.alarmEnabled = !!msg.settings.alarm_enabled;
                 }
                 if (msg.baud_choices) this.baudChoices = msg.baud_choices;
                 if (msg.sample_rate_labels) this.sampleRateLabels = msg.sample_rate_labels;
@@ -976,6 +1023,14 @@
                 if (msg.ok) this.nvfPostsOk += Object.keys(msg.sent || {}).length;
               } else if (msg.type === 'avg_window') {
                 if (msg.avg_window_s) this.avgWindow = Number(msg.avg_window_s);
+              } else if (msg.type === 'settings') {
+                if (msg.alarm_threshold_nt != null) this.alarmThreshold = Number(msg.alarm_threshold_nt);
+                if (msg.alarm_enabled != null) {
+                  this.alarmEnabled = !!msg.alarm_enabled;
+                  if (!this.alarmEnabled) this.alarm = false;
+                }
+                if (msg.avg_window_s) this.avgWindow = Number(msg.avg_window_s);
+                if (msg.sample_rate) this.sampleRate = String(msg.sample_rate);
               } else if (msg.type === 'explorer_command') {
                 if (msg.ok && msg.sample_rate) this.sampleRate = String(msg.sample_rate);
               } else if (msg.type === 'explorer_time_sync') {

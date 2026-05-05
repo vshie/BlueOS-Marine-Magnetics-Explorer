@@ -77,6 +77,7 @@ MOVING_AVG_CHOICES = (4, 10, 15, 30, 60, 120)
 MAX_MOVING_AVG_S = MOVING_AVG_CHOICES[-1]
 DEFAULT_AVG_WINDOW_S = 15
 DEFAULT_ALARM_THRESHOLD_NT = 4.0
+DEFAULT_ALARM_ENABLED = True
 
 INFO_READ_TIMEOUT_S = 1.5
 RAW_MAG_PREFIX = "RawMag"
@@ -296,6 +297,7 @@ layback_y_m = DEFAULT_LAYBACK_Y_M
 sample_rate: str = DEFAULT_SAMPLE_RATE
 avg_window_s: int = DEFAULT_AVG_WINDOW_S
 alarm_threshold_nt: float = DEFAULT_ALARM_THRESHOLD_NT
+alarm_enabled: bool = DEFAULT_ALARM_ENABLED
 towfish_serial: Optional[str] = None
 last_time_sync_str: Optional[str] = None
 last_time_sync_unix: Optional[int] = None
@@ -333,6 +335,7 @@ def _default_settings() -> Dict[str, Any]:
         "sample_rate": DEFAULT_SAMPLE_RATE,
         "avg_window_s": DEFAULT_AVG_WINDOW_S,
         "alarm_threshold_nt": DEFAULT_ALARM_THRESHOLD_NT,
+        "alarm_enabled": DEFAULT_ALARM_ENABLED,
     }
 
 
@@ -359,6 +362,16 @@ def _coerce_threshold(v: Any) -> float:
     return n
 
 
+def _coerce_alarm_enabled(v: Any) -> bool:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return bool(v)
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    return DEFAULT_ALARM_ENABLED
+
+
 def load_settings() -> Dict[str, Any]:
     ensure_log_dir()
     p = state_path()
@@ -380,6 +393,9 @@ def load_settings() -> Dict[str, Any]:
             "alarm_threshold_nt": _coerce_threshold(
                 data.get("alarm_threshold_nt", DEFAULT_ALARM_THRESHOLD_NT)
             ),
+            "alarm_enabled": _coerce_alarm_enabled(
+                data.get("alarm_enabled", DEFAULT_ALARM_ENABLED)
+            ),
         }
     except Exception:
         return _default_settings()
@@ -393,6 +409,7 @@ def save_settings(
     sample_rate_v: Optional[str] = None,
     avg_window_v: Optional[int] = None,
     alarm_threshold_v: Optional[float] = None,
+    alarm_enabled_v: Optional[bool] = None,
 ) -> None:
     ensure_log_dir()
     if baud_rate not in BAUD_CHOICES:
@@ -416,6 +433,12 @@ def save_settings(
         )
     else:
         alarm_threshold_v = _coerce_threshold(alarm_threshold_v)
+    if alarm_enabled_v is None:
+        alarm_enabled_v = _coerce_alarm_enabled(
+            current.get("alarm_enabled", DEFAULT_ALARM_ENABLED)
+        )
+    else:
+        alarm_enabled_v = _coerce_alarm_enabled(alarm_enabled_v)
     with state_path().open("w", encoding="utf-8") as f:
         json.dump(
             {
@@ -426,6 +449,7 @@ def save_settings(
                 "sample_rate": sample_rate_v,
                 "avg_window_s": int(avg_window_v),
                 "alarm_threshold_nt": float(alarm_threshold_v),
+                "alarm_enabled": bool(alarm_enabled_v),
             },
             f,
             indent=2,
@@ -454,14 +478,21 @@ def apply_layback_settings(settings: Dict[str, Any]) -> None:
 
 
 def apply_runtime_settings(settings: Dict[str, Any]) -> None:
-    """Apply persisted runtime settings (sample rate, avg window, alarm threshold)."""
-    global sample_rate, avg_window_s, alarm_threshold_nt
+    """Apply persisted runtime settings (sample rate, avg window, alarm threshold, alarm enabled)."""
+    global sample_rate, avg_window_s, alarm_threshold_nt, alarm_enabled
     with state_lock:
-        sample_rate = _coerce_sample_rate(settings.get("sample_rate", DEFAULT_SAMPLE_RATE))
-        avg_window_s = _coerce_avg_window(settings.get("avg_window_s", DEFAULT_AVG_WINDOW_S))
-        alarm_threshold_nt = _coerce_threshold(
-            settings.get("alarm_threshold_nt", DEFAULT_ALARM_THRESHOLD_NT)
-        )
+        if "sample_rate" in settings:
+            sample_rate = _coerce_sample_rate(settings.get("sample_rate", DEFAULT_SAMPLE_RATE))
+        if "avg_window_s" in settings:
+            avg_window_s = _coerce_avg_window(settings.get("avg_window_s", DEFAULT_AVG_WINDOW_S))
+        if "alarm_threshold_nt" in settings:
+            alarm_threshold_nt = _coerce_threshold(
+                settings.get("alarm_threshold_nt", DEFAULT_ALARM_THRESHOLD_NT)
+            )
+        if "alarm_enabled" in settings:
+            alarm_enabled = _coerce_alarm_enabled(
+                settings.get("alarm_enabled", DEFAULT_ALARM_ENABLED)
+            )
 
 
 def parse_sentence(raw: str) -> Optional[Dict[str, Any]]:
@@ -1126,6 +1157,7 @@ def process_incoming_sentence(raw: str) -> None:
         win_s = avg_window_s
         avg_v, dev_v, n_samples = compute_moving_average(win_s)
         threshold = alarm_threshold_nt
+        alarm_on = alarm_enabled
         lat = gps_fix["lat"]
         lon = gps_fix["lon"]
         alt_m = gps_fix["alt_m"]
@@ -1134,7 +1166,8 @@ def process_incoming_sentence(raw: str) -> None:
         lb_y = layback_y_m
 
     alarm_now = bool(
-        dev_v is not None
+        alarm_on
+        and dev_v is not None
         and n_samples >= 2
         and math.isfinite(dev_v)
         and abs(dev_v) > float(threshold)
@@ -1168,6 +1201,7 @@ def process_incoming_sentence(raw: str) -> None:
         "avg_window_s": win_s,
         "alarm": alarm_now,
         "alarm_threshold_nt": threshold,
+        "alarm_enabled": alarm_on,
     }
     with state_lock:
         last_parsed = merged
@@ -1453,6 +1487,7 @@ def api_settings_get():
 
 @app.route("/api/settings", methods=["POST"])
 def api_settings_post():
+    global last_alarm
     data = request.get_json(force=True, silent=True) or {}
     current_settings = load_settings()
     port = str(data.get("port", current_settings.get("port", "")))
@@ -1468,6 +1503,9 @@ def api_settings_post():
     alarm_threshold_v = _coerce_threshold(
         data.get("alarm_threshold_nt", current_settings.get("alarm_threshold_nt", DEFAULT_ALARM_THRESHOLD_NT))
     )
+    alarm_enabled_v = _coerce_alarm_enabled(
+        data.get("alarm_enabled", current_settings.get("alarm_enabled", DEFAULT_ALARM_ENABLED))
+    )
     if baud not in BAUD_CHOICES:
         return jsonify({"ok": False, "error": "invalid baud_rate"}), 400
     save_settings(
@@ -1478,6 +1516,7 @@ def api_settings_post():
         sample_rate_v=sample_rate_v,
         avg_window_v=avg_window_v,
         alarm_threshold_v=alarm_threshold_v,
+        alarm_enabled_v=alarm_enabled_v,
     )
     apply_layback_settings({"layback_x_m": layback_x, "layback_y_m": layback_y})
     apply_runtime_settings(
@@ -1485,6 +1524,21 @@ def api_settings_post():
             "sample_rate": sample_rate_v,
             "avg_window_s": avg_window_v,
             "alarm_threshold_nt": alarm_threshold_v,
+            "alarm_enabled": alarm_enabled_v,
+        }
+    )
+    # If alarm just got disabled, immediately clear the live alarm flag so the
+    # UI/widget update without waiting for the next sample.
+    if not alarm_enabled_v:
+        with state_lock:
+            last_alarm = False
+    sse_broadcast(
+        {
+            "type": "settings",
+            "alarm_threshold_nt": alarm_threshold_v,
+            "alarm_enabled": alarm_enabled_v,
+            "avg_window_s": avg_window_v,
+            "sample_rate": sample_rate_v,
         }
     )
     return jsonify(
@@ -1497,6 +1551,7 @@ def api_settings_post():
             "sample_rate": sample_rate_v,
             "avg_window_s": avg_window_v,
             "alarm_threshold_nt": alarm_threshold_v,
+            "alarm_enabled": alarm_enabled_v,
         }
     )
 
@@ -1525,6 +1580,7 @@ def api_status():
         sr = sample_rate
         aw = avg_window_s
         thr = alarm_threshold_nt
+        alarm_on = alarm_enabled
         ts_serial = towfish_serial
         last_avg = last_moving_avg_nt
         last_dev = last_deviation_nt
@@ -1554,6 +1610,7 @@ def api_status():
             "sample_rate_label": SAMPLE_RATE_LABELS.get(sr, "?"),
             "avg_window_s": aw,
             "alarm_threshold_nt": thr,
+            "alarm_enabled": alarm_on,
             "towfish_serial": ts_serial,
             "last_moving_avg_nt": last_avg,
             "last_deviation_nt": last_dev,

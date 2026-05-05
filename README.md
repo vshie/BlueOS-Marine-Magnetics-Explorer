@@ -9,7 +9,7 @@ BlueOS extension for a **Marine Magnetics Explorer** towed magnetometer. It:
 - Appends **CSV** logs under `/app/logs` with a new file per connection: `explorer_YYYYmmdd_HHMMSS.csv`.
 - Writes per-session **raw text logs** to `/app/logs/RawMagYYYY-MM-DD.txt` and `RawGPSYYYY-MM-DD.txt`. The same process writes both files; for every received magnetometer sentence we append the raw mag line and a synthesised NMEA block (`$GPRMC`, `$GPGGA`, `$GPGSA`, `$GPGSV`) so the two files share the same row count and timestamps.
 - Logs both the **vessel position** (`vessel_lat`, `vessel_lon`, `vessel_alt_m`) and the **estimated towfish position** (`towfish_lat`, `towfish_lon`) from layback offsets and AHRS heading.
-- Computes a rolling **moving average** over a user-selectable window (4 / 10 / 15 / 30 / 60 / 120 s) and the **deviation** (`field_nT − moving_avg`). Triggers a UI/widget **alarm flash** + CSV `alarm` flag when `|deviation| > alarm_threshold_nt`.
+- Computes a rolling **moving average** over a user-selectable window (4 / 10 / 15 / 30 / 60 / 120 s) and the **deviation** (`field_nT − moving_avg`). Triggers a UI/widget **alarm flash** + CSV `alarm` flag when `|deviation| > alarm_threshold_nt`. The alarm can be toggled off entirely via `alarm_enabled`.
 - Sends **NAMED_VALUE_FLOAT** messages (total field, signal, depth, quality, deviation, alarm) to the autopilot log via Mavlink2Rest.
 - Lets the operator **sync the magnetometer's clock** to current UTC (system clock / GPS-disciplined) via the Explorer `T` command.
 
@@ -114,6 +114,7 @@ The first workflow run may fail until Docker Hub credentials are configured.
 | `sample_rate` | `"1"` | Explorer cycle command: `0` off, `1` 4 Hz, `2` 2 Hz, `3` 1 Hz |
 | `avg_window_s` | `15` | Moving-average window in seconds (one of 4 / 10 / 15 / 30 / 60 / 120) |
 | `alarm_threshold_nt` | `4.0` | Absolute deviation (nT) above which the alarm fires |
+| `alarm_enabled` | `true` | When `false`, suppresses alarm flag, MAG_ALRM, UI flashing |
 
 ## CSV columns (added by this version)
 
